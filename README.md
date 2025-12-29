@@ -9,4 +9,4 @@ pip install -r requirements.txt
 
 Run the app script
 
-py app.py
+py vieweo.py
