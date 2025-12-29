@@ -10,3 +10,7 @@ pip install -r requirements.txt
 Run the app script
 
 py vieweo.py
+
+Login credentials:
+admin@gmail.com
+Admin
