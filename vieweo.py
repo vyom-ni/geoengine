@@ -756,12 +756,21 @@ FRONTEND_HTML = '''
         const FullReportPage = ({ agentName, user, onBack }) => {
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
             
             useEffect(() => {
                 fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
                     .then(r => r.json())
-                    .then(d => { setData(d); setLoading(false); })
-                    .catch(() => setLoading(false));
+                    .then(d => { 
+                        console.log('Full report data:', d);
+                        setData(d); 
+                        setLoading(false); 
+                    })
+                    .catch(e => {
+                        console.error('Error fetching report:', e);
+                        setError(e.message);
+                        setLoading(false);
+                    });
             }, [agentName]);
             
             if (loading) return (
@@ -769,19 +778,23 @@ FRONTEND_HTML = '''
                     <div className="text-center">
                         <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"/>
                         <p className="text-gray-600">Generating your full report...</p>
+                        <p className="text-gray-400 text-sm mt-2">AI analysis in progress...</p>
                     </div>
                 </div>
             );
             
-            if (!data || data.error) return (
+            if (error || !data || data.error) return (
                 <div className="min-h-screen flex items-center justify-center">
-                    <p className="text-red-600">{data?.error || 'Error loading report'}</p>
+                    <div className="text-center">
+                        <p className="text-red-600 mb-4">{data?.error || error || 'Error loading report'}</p>
+                        <button onClick={onBack} className="px-4 py-2 bg-blue-600 text-white rounded-lg">Go Back</button>
+                    </div>
                 </div>
             );
             
-            const agent = data.agent;
-            const analysis = data.analysis;
-            const scores = analysis.scores;
+            const agent = data.agent || {};
+            const analysis = data.analysis || {};
+            const scores = analysis.scores || {};
             
             return (
                 <div className="min-h-screen bg-gray-50">
@@ -804,18 +817,18 @@ FRONTEND_HTML = '''
                         <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-3xl p-8 text-white mb-8">
                             <div className="flex flex-col lg:flex-row items-center gap-8">
                                 <div className="w-24 h-24 bg-white/20 rounded-2xl flex items-center justify-center text-3xl font-bold">
-                                    {agent.name.split(' ').map(n => n[0]).join('')}
+                                    {(agent.name || 'NA').split(' ').map(n => n[0]).join('')}
                                 </div>
                                 <div className="flex-1 text-center lg:text-left">
                                     <p className="text-blue-200 text-sm mb-1">AI Visibility Report</p>
-                                    <h1 className="text-3xl font-bold mb-2">{agent.name}</h1>
-                                    <p className="text-blue-100">{agent.brokerage} • {agent.location?.city}, {agent.location?.state}</p>
+                                    <h1 className="text-3xl font-bold mb-2">{agent.name || 'Unknown Agent'}</h1>
+                                    <p className="text-blue-100">{agent.brokerage || 'Unknown Brokerage'} • {agent.location?.city || 'Unknown'}, {agent.location?.state || ''}</p>
                                 </div>
                                 <div className="text-center">
-                                    <div className="text-5xl font-bold mb-1">{scores.overall.score}</div>
+                                    <div className="text-5xl font-bold mb-1">{scores.overall?.score || 0}</div>
                                     <div className="text-blue-200">Overall Score</div>
                                     <div className="mt-2 px-4 py-1 bg-white/20 rounded-full text-sm">
-                                        {scores.overall.tier} Tier
+                                        {scores.overall?.tier || 'Unknown'} Tier
                                     </div>
                                 </div>
                             </div>
@@ -938,42 +951,50 @@ FRONTEND_HTML = '''
                             </h2>
                             
                             {/* Critical Issues */}
-                            {analysis.geo_improvement_roadmap?.critical_issues && (
+                            {analysis.geo_improvement_roadmap?.critical_issues && analysis.geo_improvement_roadmap.critical_issues.length > 0 && (
                                 <div className="mb-8">
                                     <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
                                         <span className="px-3 py-1 bg-red-100 text-red-700 rounded-full text-xs font-bold">CRITICAL</span>
                                         Address Immediately
                                     </h3>
                                     <ul className="space-y-2 border-l-4 border-red-500 pl-4">
-                                        {analysis.geo_improvement_roadmap.critical_issues.map((item, i) => (
-                                            <li key={i} className="text-sm text-gray-700">
-                                                <span className="font-semibold text-red-600">{item.split(':')[0]}:</span> {item.split(':')[1]}
-                                            </li>
-                                        ))}
+                                        {analysis.geo_improvement_roadmap.critical_issues.map((item, i) => {
+                                            const parts = (item || '').split(':');
+                                            return (
+                                                <li key={i} className="text-sm text-gray-700">
+                                                    {parts.length > 1 ? (
+                                                        <><span className="font-semibold text-red-600">{parts[0]}:</span> {parts.slice(1).join(':')}</>
+                                                    ) : item}
+                                                </li>
+                                            );
+                                        })}
                                     </ul>
                                 </div>
                             )}
                             
                             {/* High Priority */}
-                            {analysis.geo_improvement_roadmap?.high_priority && (
+                            {analysis.geo_improvement_roadmap?.high_priority && analysis.geo_improvement_roadmap.high_priority.length > 0 && (
                                 <div className="mb-8">
                                     <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
                                         <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">HIGH PRIORITY</span>
                                         3-6 Month Plan
                                     </h3>
                                     <div className="grid md:grid-cols-2 gap-4">
-                                        {analysis.geo_improvement_roadmap.high_priority.map((item, i) => (
-                                            <div key={i} className="bg-amber-50 rounded-lg p-4 border border-amber-200">
-                                                <h4 className="font-semibold text-amber-900 text-sm mb-2">{item.split(':')[0]}</h4>
-                                                <p className="text-sm text-amber-800">{item.split(':')[1] || item}</p>
-                                            </div>
-                                        ))}
+                                        {analysis.geo_improvement_roadmap.high_priority.map((item, i) => {
+                                            const parts = (item || '').split(':');
+                                            return (
+                                                <div key={i} className="bg-amber-50 rounded-lg p-4 border border-amber-200">
+                                                    <h4 className="font-semibold text-amber-900 text-sm mb-2">{parts[0]}</h4>
+                                                    <p className="text-sm text-amber-800">{parts.length > 1 ? parts.slice(1).join(':') : ''}</p>
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             )}
                             
                             {/* Quick Wins */}
-                            {analysis.geo_improvement_roadmap?.quick_wins && (
+                            {analysis.geo_improvement_roadmap?.quick_wins && analysis.geo_improvement_roadmap.quick_wins.length > 0 && (
                                 <div className="mb-8">
                                     <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
                                         <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">QUICK WINS</span>
@@ -985,7 +1006,7 @@ FRONTEND_HTML = '''
                                                 <svg className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
                                                 </svg>
-                                                <div className="text-sm text-emerald-900">{item}</div>
+                                                <div className="text-sm text-emerald-900">{item || ''}</div>
                                             </div>
                                         ))}
                                     </div>
@@ -1015,9 +1036,9 @@ FRONTEND_HTML = '''
                                         <span className="text-emerald-500">✓</span> Strengths
                                     </h3>
                                     <ul className="space-y-2">
-                                        {analysis.profile_analysis?.strengths?.map((s, i) => (
+                                        {(analysis.profile_analysis?.strengths || []).map((s, i) => (
                                             <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                <span className="text-emerald-500">•</span> {s}
+                                                <span className="text-emerald-500">•</span> {s || ''}
                                             </li>
                                         ))}
                                     </ul>
@@ -1027,9 +1048,9 @@ FRONTEND_HTML = '''
                                         <span className="text-red-500">⚠</span> Critical Gaps
                                     </h3>
                                     <ul className="space-y-2">
-                                        {analysis.profile_analysis?.areas_for_improvement?.map((a, i) => (
+                                        {(analysis.profile_analysis?.areas_for_improvement || []).map((a, i) => (
                                             <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                <span className="text-red-500">•</span> {a}
+                                                <span className="text-red-500">•</span> {a || ''}
                                             </li>
                                         ))}
                                     </ul>
@@ -1039,13 +1060,13 @@ FRONTEND_HTML = '''
                             {/* Detailed GEO Recommendations */}
                             <div className="space-y-4">
                                 <h3 className="font-semibold text-gray-900 mb-4">Detailed GEO Improvement Strategy</h3>
-                                {analysis.recommendations?.for_agent?.map((rec, i) => (
+                                {(analysis.recommendations?.for_agent || []).map((rec, i) => (
                                     <div key={i} className="bg-gradient-to-r from-blue-50 to-blue-100 rounded-lg p-5 border border-blue-200">
                                         <div className="flex items-start gap-3">
                                             <span className="inline-block w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold">
                                                 {i + 1}
                                             </span>
-                                            <p className="text-sm text-gray-800 leading-relaxed">{rec}</p>
+                                            <p className="text-sm text-gray-800 leading-relaxed">{rec || ''}</p>
                                         </div>
                                     </div>
                                 ))}
@@ -1055,7 +1076,7 @@ FRONTEND_HTML = '''
                         {/* Executive Summary */}
                         <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-8 text-white">
                             <h2 className="text-xl font-bold mb-4">Executive Summary</h2>
-                            <p className="text-gray-300 leading-relaxed">{analysis.executive_summary}</p>
+                            <p className="text-gray-300 leading-relaxed">{analysis.executive_summary || 'No summary available.'}</p>
                         </div>
                     </main>
                 </div>
