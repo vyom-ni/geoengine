@@ -190,13 +190,7 @@ def index():
 def dashboard():
     return render_template("dashboard.html")
 
-# Serve static images if they are in frontend/images
-@app.route('/images/<path:filename>')
-def serve_images(filename):
-    return send_from_directory('frontend/images', filename)
-
 # ============== MAIN ==============
-
 def run_server():
     print(f"""
 ============================================================
