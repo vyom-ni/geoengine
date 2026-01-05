@@ -203,5 +203,9 @@ Gemini: {'Enabled' if Config.GEMINI_API_KEY else 'Disabled'}
     """)
     app.run(host='0.0.0.0', port=Config.PORT, debug=Config.DEBUG)
 
+
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 if __name__ == '__main__':
     run_server()
