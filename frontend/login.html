@@ -1,208 +1,86 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Vieweo</title>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700&display=swap"
-        rel="stylesheet">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        navy: {
-                            DEFAULT: '#162456',
-                            light: 'rgba(22, 36, 86, 0.6)',
-                            lighter: 'rgba(22, 36, 86, 0.3)',
-                            border: 'rgba(22, 36, 86, 0.2)',
-                        },
-                        blue: {
-                            brand: '#1557B0',
-                        }
-                    },
-                    fontFamily: {
-                        sora: ['Sora', 'sans-serif'],
-                        inter: ['Inter', 'sans-serif'],
-                    }
-                }
-            }
-        }
-    </script>
+  <meta charset="UTF-8" />
+  <title>Vieweo Login</title>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700&display=swap" rel="stylesheet">
+  <!-- Styles -->
+  <link rel="stylesheet" href="styles/login.css" />
 </head>
+<body>
 
-<body class="bg-white m-0 p-0 min-h-screen w-full">
-    <!-- Main Container -->
-    <div class="flex flex-col lg:flex-row min-h-screen w-full overflow-hidden">
+<div class="login-wrapper">
 
-        <!-- Left Section: Form -->
-        <div
-            class="flex-1 flex flex-col items-center justify-center p-8 lg:p-[120px] lg:pr-[98px] max-w-2xl mx-auto lg:mx-0 lg:max-w-none order-1 lg:order-0">
-            <div class="w-full max-w-[518px] flex flex-col gap-5">
+  <!-- LEFT -->
+  <div class="login-left">
+    <div class="form-container">
+      <h1>Welcome to Vieweo</h1>
+      <p class="subtitle">
+        Check your AI visibility score and see how often AI platforms recommend you
+      </p>
 
-                <!-- Header -->
-                <div class="flex flex-col gap-[10px]">
-                    <h1 class="font-sora font-bold text-[32px] leading-[40px] text-navy">
-                        Welcome to Vieweo
-                    </h1>
-                    <p class="font-inter font-medium text-[15px] leading-[18px] text-navy-light">
-                        Check your AI visibility score and see how often AI platforms recommend you
-                    </p>
-                </div>
-
-                <!-- Form Section -->
-                <div class="flex flex-col gap-[15px]">
-
-                    <!-- Names Row -->
-                    <div class="flex flex-col sm:flex-row items-center gap-5">
-
-                        <!-- First Name -->
-                        <div class="flex flex-col gap-[5px] w-full sm:flex-1">
-                            <label class="font-inter font-medium text-[12px] leading-[15px] text-navy">
-                                First Name
-                            </label>
-                            <div
-                                class="box-border flex items-center px-[10px] py-[5px] h-[37px] bg-white border border-navy-border rounded-[5px]">
-                                <input type="text" placeholder="John"
-                                    class="w-full font-inter font-normal text-[16px] leading-[19px] text-navy-lighter outline-none placeholder:text-navy-lighter">
-                            </div>
-                        </div>
-
-                        <!-- Last Name -->
-                        <div class="flex flex-col gap-[5px] w-full sm:flex-1">
-                            <label class="font-inter font-medium text-[12px] leading-[15px] text-navy">
-                                Last Name
-                            </label>
-                            <div
-                                class="box-border flex items-center px-[10px] py-[5px] h-[37px] bg-white border border-navy-border rounded-[5px]">
-                                <input type="text" placeholder="Smith"
-                                    class="w-full font-inter font-normal text-[16px] leading-[19px] text-navy-lighter outline-none placeholder:text-navy-lighter">
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Zip Code -->
-                    <div class="flex flex-col gap-[5px]">
-                        <div class="flex flex-row items-center">
-                            <span class="font-inter font-medium text-[12px] leading-[15px] text-navy">
-                                ZIP code
-                            </span>
-                            <div class="flex flex-row items-center p-[2px] gap-[10px] ml-2">
-                                <div
-                                    class="w-[12px] h-[12px] bg-navy/70 rounded-full flex items-center justify-center text-white text-[8px] font-bold">
-                                    i
-                                </div>
-                            </div>
-                        </div>
-                        <div
-                            class="box-border flex items-center px-[10px] py-[5px] h-[37px] bg-white border border-navy-border rounded-[5px]">
-                            <input type="text" placeholder="19103"
-                                class="w-full font-inter font-normal text-[16px] leading-[19px] text-navy-lighter outline-none placeholder:text-navy-lighter">
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Button Section -->
-                <div class="flex flex-col items-center gap-[10px]">
-                    <button
-                        class="flex justify-center items-center p-[10px] w-full h-[37px] bg-blue-brand rounded-[10px] hover:bg-blue-700 transition-colors">
-                        <span class="font-inter font-bold text-[16px] leading-[19px] text-white">
-                            Check My AI Visibility
-                        </span>
-                    </button>
-                    <p class="font-inter font-medium text-[12px] leading-[15px] text-center text-navy/50">
-                        Used by agents competing for visibility on ChatGPT , Gemini , and Perplexity.
-                    </p>
-                </div>
-            </div>
+      <div class="row">
+        <div class="field">
+          <label>First Name</label>
+          <input type="text" placeholder="John">
         </div>
-
-        <!-- Right Section: Hero -->
-        <div class="hidden lg:flex flex-1 flex-col justify-center items-start px-[50px] py-[240px] gap-[10px] bg-cover bg-no-repeat bg-center min-h-[1024px] order-0 lg:order-1"
-            style="background: linear-gradient(0deg, rgba(50, 62, 76, 0.5), rgba(50, 62, 76, 0.5)), url('images/background/login_background.jpg');">
-
-            <div class="flex flex-col justify-center items-start gap-5 w-full max-w-[630px] mx-auto">
-                <h1 class="font-sora font-semibold text-[40px] leading-[50px] text-[#E0E0E0]">
-                    Be the Agent AI Recommends.
-                </h1>
-                <p class="font-inter font-semibold text-[16px] leading-[19px] text-[#D0D0D0]">
-                    Vieweo measures how often AI platforms recommend you as the best agent in your market.
-                </p>
-
-                <!-- Why GEO Matters Box -->
-                <div
-                    class="flex flex-col items-start p-5 gap-[12px] w-full bg-white/10 rounded-[20px] backdrop-blur-sm">
-                    <h3 class="font-inter font-bold text-[16px] leading-[19px] text-[#E0E0E0]">
-                        Why GEO Matters for Real Estate
-                    </h3>
-
-                    <!-- List -->
-                    <div class="flex flex-col items-start gap-[12px]">
-
-                        <!-- Item 1 -->
-                        <div class="flex flex-row items-center gap-[10px]">
-                            <svg width="17" height="17" viewBox="0 0 17 17" fill="none"
-                                xmlns="http://www.w3.org/2000/svg" class="transform rotate-90 flex-shrink-0">
-                                <path d="M8.5 2.125V14.875" stroke="#D0D0D0" stroke-width="2" stroke-linecap="round"
-                                    stroke-linejoin="round" />
-                                <path d="M2.125 8.5L8.5 2.125L14.875 8.5" stroke="#D0D0D0" stroke-width="2"
-                                    stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                            <span class="font-inter font-medium text-[14px] leading-[17px] text-[#D0D0D0]">
-                                Buyers now ask AI: “Whose the best agent in Rittenhouse?”
-                            </span>
-                        </div>
-
-                        <!-- Item 2 -->
-                        <div class="flex flex-row items-center gap-[10px]">
-                            <svg width="17" height="17" viewBox="0 0 17 17" fill="none"
-                                xmlns="http://www.w3.org/2000/svg" class="transform rotate-90 flex-shrink-0">
-                                <path d="M8.5 2.125V14.875" stroke="#D0D0D0" stroke-width="2" stroke-linecap="round"
-                                    stroke-linejoin="round" />
-                                <path d="M2.125 8.5L8.5 2.125L14.875 8.5" stroke="#D0D0D0" stroke-width="2"
-                                    stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                            <span class="font-inter font-medium text-[14px] leading-[17px] text-[#D0D0D0]">
-                                AI platforms answer directly - with only 1 or 2 names
-                            </span>
-                        </div>
-
-                        <!-- Item 3 -->
-                        <div class="flex flex-row items-center gap-[10px]">
-                            <svg width="17" height="17" viewBox="0 0 17 17" fill="none"
-                                xmlns="http://www.w3.org/2000/svg" class="transform rotate-90 flex-shrink-0">
-                                <path d="M8.5 2.125V14.875" stroke="#D0D0D0" stroke-width="2" stroke-linecap="round"
-                                    stroke-linejoin="round" />
-                                <path d="M2.125 8.5L8.5 2.125L14.875 8.5" stroke="#D0D0D0" stroke-width="2"
-                                    stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                            <span class="font-inter font-medium text-[14px] leading-[17px] text-[#D0D0D0]">
-                                If AI can’t recognize you, it won’t recommend you
-                            </span>
-                        </div>
-
-                        <!-- Item 4 -->
-                        <div class="flex flex-row items-center gap-[10px]">
-                            <svg width="17" height="17" viewBox="0 0 17 17" fill="none"
-                                xmlns="http://www.w3.org/2000/svg" class="transform rotate-90 flex-shrink-0">
-                                <path d="M8.5 2.125V14.875" stroke="#D0D0D0" stroke-width="2" stroke-linecap="round"
-                                    stroke-linejoin="round" />
-                                <path d="M2.125 8.5L8.5 2.125L14.875 8.5" stroke="#D0D0D0" stroke-width="2"
-                                    stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                            <span class="font-inter font-medium text-[14px] leading-[17px] text-[#D0D0D0]">
-                                GEO = Generative Engine Optimization for AI visibility
-                            </span>
-                        </div>
-
-                    </div>
-                </div>
-            </div>
+        <div class="field">
+          <label>Last Name</label>
+          <input type="text" placeholder="Smith">
         </div>
+      </div>
+
+      <div class="field zip-field">
+        <label>ZIP code</label>
+        <input type="text" placeholder="John">
+      </div>
+
+      <button class="submit-btn">Check My AI Visibility</button>
+
+      <p class="note">
+        Used by agents competing for visibility on ChatGPT, Gemini, and Perplexity.
+      </p>
     </div>
-</body>
+  </div>
 
+  <!-- RIGHT -->
+  <div class="login-right">
+    <div class="content-box">
+      <h2>Be the Agent<br>AI Recommends.</h2>
+
+      <p>
+        Vieweo measures how often AI platforms recommend you as the best agent in your market.
+      </p>
+
+      <div class="info-box">
+        <h3>Why GEO Matters for Real Estate</h3>
+
+        <div class="info-list">
+          <div class="info-item">
+            <span class="arrow">➜</span>
+            Buyers now ask AI: “Whose the best agent in Rittenhouse?”
+          </div>
+          <div class="info-item">
+            <span class="arrow">➜</span>
+            AI platforms answer directly – with only 1 or 2 names
+          </div>
+          <div class="info-item">
+            <span class="arrow">➜</span>
+            If AI can’t recognize you, it won’t recommend you
+          </div>
+          <div class="info-item">
+            <span class="arrow">➜</span>
+            GEO = Generative Engine Optimization for AI visibility
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
 </html>
