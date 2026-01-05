@@ -7,7 +7,8 @@
   <!-- Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Sora:wght@600;700&family=Poppins:wght@600;700&display=swap" rel="stylesheet">
 
-  <link rel="stylesheet" href="styles/dashboard.css">
+  <!-- Styles -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/dashboard.css') }}">
 </head>
 <body>
 
@@ -23,33 +24,33 @@
 
     <a class="nav-item active">
         <div class="nav-left">
-        <img src="images/icons/sidebar_dashboard_icon.svg" class="nav-icon" alt="Dashboard">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_dashboard_icon.svg') }}" class="nav-icon" alt="Dashboard">
         <span>Dashboard</span>
         </div>
     </a>
 
     <a class="nav-item locked">
         <div class="nav-left">
-        <img src="images/icons/sidebar_salt_icon.svg" class="nav-icon" alt="SALT">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_salt_icon.svg') }}" class="nav-icon" alt="SALT">
         <span>SALT</span>
         </div>
-        <img src="images/icons/sidebar_lock_icon.svg" class="lock-icon" alt="Locked">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
     </a>
 
     <a class="nav-item locked">
         <div class="nav-left">
-        <img src="images/icons/sidebar_roadmap_icon.svg" class="nav-icon" alt="Roadmap">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_roadmap_icon.svg') }}" class="nav-icon" alt="Roadmap">
         <span>Roadmap</span>
         </div>
-        <img src="images/icons/sidebar_lock_icon.svg" class="lock-icon" alt="Locked">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
     </a>
 
     <a class="nav-item locked">
         <div class="nav-left">
-        <img src="images/icons/sidebar_strategy_icon.svg" class="nav-icon" alt="Strategy">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_strategy_icon.svg') }}" class="nav-icon" alt="Strategy">
         <span>Strategy</span>
         </div>
-        <img src="images/icons/sidebar_lock_icon.svg" class="lock-icon" alt="Locked">
+        <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
     </a>
 
     </nav>
@@ -69,7 +70,7 @@
       <!-- PROFILE CARD -->
       <div class="card profile-card">
         <div class="profile-left">
-          <img src="images/avatar.jpg" class="avatar" />
+          <img src="{{ url_for('static', filename='images/avatar.jpg') }}" class="avatar" />
           <div style="display: flex; flex-direction: column; gap: 4px;">
             <p style="color: #162456;">AI Visibility Report</p>
             <h2 style="color: #162456;">Ben Caballero</h2>

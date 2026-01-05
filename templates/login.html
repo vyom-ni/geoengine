@@ -7,7 +7,7 @@
   <!-- Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700&display=swap" rel="stylesheet">
   <!-- Styles -->
-  <link rel="stylesheet" href="styles/login.css" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/login.css') }}">
 </head>
 <body>
 
@@ -24,20 +24,25 @@
       <div class="row">
         <div class="field">
           <label>First Name</label>
-          <input type="text" placeholder="John">
+          <input type="text" id="firstName" placeholder="John">
         </div>
         <div class="field">
           <label>Last Name</label>
-          <input type="text" placeholder="Smith">
+          <input type="text" id="lastName" placeholder="Smith">
         </div>
+      </div>
+
+      <div class="field">
+        <label>Email</label>
+        <input type="email" id="email" placeholder="john@example.com">
       </div>
 
       <div class="field zip-field">
         <label>ZIP code</label>
-        <input type="text" placeholder="John">
+        <input type="text" id="zipcode" placeholder="12345">
       </div>
 
-      <button class="submit-btn">Check My AI Visibility</button>
+      <button class="submit-btn" id="loginBtn">Check My AI Visibility</button>
 
       <p class="note">
         Used by agents competing for visibility on ChatGPT, Gemini, and Perplexity.
@@ -81,6 +86,22 @@
   </div>
 
 </div>
+
+<script>
+  document.getElementById("loginBtn").addEventListener("click", function () {
+    const firstName = document.getElementById("firstName").value;
+    const lastName = document.getElementById("lastName").value;
+    const email = document.getElementById("email").value;
+    const zipcode = document.getElementById("zipcode").value;
+
+    if (!firstName || !lastName || !email || !zipcode) {
+      alert("Please fill in all fields.");
+      return;
+    }
+
+    window.location.href = "/dashboard";
+  });
+</script>
 
 </body>
 </html>

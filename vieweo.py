@@ -4,7 +4,7 @@ GEO (Generative Engine Optimization) Scoring System
 Phase 1: Login → Free Snapshot → Paywall → Full Report
 """
 
-from flask import Flask, jsonify, request, render_template_string, session, Response, send_from_directory
+from flask import Flask, jsonify, render_template, request, render_template_string, session, Response, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
@@ -17,7 +17,7 @@ load_dotenv()
 
 from agent_intelligence_v2 import AgentIntelligenceSystem
 
-app = Flask(__name__, template_folder='.', static_folder='frontend')
+app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 CORS(app)
 
@@ -182,11 +182,13 @@ def leaderboard():
     })
 
 # ============== FRONTEND ==============
-
-
 @app.route('/')
 def index():
-    return send_from_directory('.', 'index.html')
+    return render_template("login.html")
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template("dashboard.html")
 
 # Serve static images if they are in frontend/images
 @app.route('/images/<path:filename>')
