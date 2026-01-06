@@ -22,32 +22,32 @@
 
     <nav class="nav">
 
-    <a class="nav-item active">
+    <a class="nav-item active" data-selected-icon="images/icons/sbar_dash_selected.svg" data-unselected-icon="images/icons/sbar_dash_unselected.svg">
         <div class="nav-left">
-        <img src="{{ url_for('static', filename='images/icons/sidebar_dashboard_icon.svg') }}" class="nav-icon" alt="Dashboard">
+        <img src="{{ url_for('static', filename='images/icons/sbar_dash_selected.svg') }}" class="nav-icon" alt="Dashboard">
         <span>Dashboard</span>
         </div>
     </a>
 
-    <a class="nav-item locked">
+    <a class="nav-item locked" data-selected-icon="images/icons/sbar_salt_selected.svg" data-unselected-icon="images/icons/sbar_salt_unselected.svg">
         <div class="nav-left">
-        <img src="{{ url_for('static', filename='images/icons/sidebar_salt_icon.svg') }}" class="nav-icon" alt="SALT">
+        <img src="{{ url_for('static', filename='images/icons/sbar_salt_unselected.svg') }}" class="nav-icon" alt="SALT">
         <span>SALT</span>
         </div>
         <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
     </a>
 
-    <a class="nav-item locked">
+    <a class="nav-item locked" data-selected-icon="images/icons/sbar_roadmap_selected.svg" data-unselected-icon="images/icons/sbar_roadmap_unselected.svg">
         <div class="nav-left">
-        <img src="{{ url_for('static', filename='images/icons/sidebar_roadmap_icon.svg') }}" class="nav-icon" alt="Roadmap">
+        <img src="{{ url_for('static', filename='images/icons/sbar_roadmap_unselected.svg') }}" class="nav-icon" alt="Roadmap">
         <span>Roadmap</span>
         </div>
         <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
     </a>
 
-    <a class="nav-item locked">
+    <a class="nav-item locked" data-selected-icon="images/icons/sbar_strategy_selected.svg" data-unselected-icon="images/icons/sbar_strategy_unselected.svg">
         <div class="nav-left">
-        <img src="{{ url_for('static', filename='images/icons/sidebar_strategy_icon.svg') }}" class="nav-icon" alt="Strategy">
+        <img src="{{ url_for('static', filename='images/icons/sbar_strategy_unselected.svg') }}" class="nav-icon" alt="Strategy">
         <span>Strategy</span>
         </div>
         <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon" alt="Locked">
@@ -101,25 +101,32 @@
       </div>
 
       <!-- LEADERBOARD -->
-      <h2>Leaderboard</h2>
+      <div style="padding-top: 15px; padding-bottom: 10px;">
+        <h2>Leaderboard</h2>
+      </div>
       <div class="leaderboard">
-        <div class="lb-card">Top 99% nationally</div>
-        <div class="lb-card">#1 in TX (158 agents)</div>
-        <div class="lb-card">#1 in Dallas (23 agents)</div>
+        <div class="lb-card"><span class="first-part">Top 99%</span> <span class="label">nationally</span></div>
+        <div class="lb-card"><span class="first-part">#1</span> <span class="label">in TX (158 agents)</span></div>
+        <div class="lb-card"><span class="first-part">#1</span> <span class="label">in Dallas (23 agents)</span></div>
       </div>
 
       <!-- EXEC SUMMARY -->
       <div class="summary">
         <h3>Executive Summary</h3>
         <p>
-          Ben Caballero is a strong-tier real estate professional ranked #1 in TX and #1 in Dallas,
-          placing them in the top 99% nationally. With 30 years of experience and $10B+ in career sales,
-          they demonstrate strong market expertise. Recommended for buyers and sellers in Dallas.
+          Ben Caballero is a strong-tier real estate professional ranked #1 in TX and #1 in Dallas, placing them in the top 99%
+          nationally. With 30 years of experience and $10B+ in career sales, they demonstrate strong market expertise. Client
+          satisfaction is strong with a 4.7/5.0 rating across 51 reviews on Yelp. Notable achievement : Guinness World Record Holder.
+          Specializing in New Construction properties, they operate from Dallas, TX. Connect via website : https://homeusa.com
+          ,
+          linkedin : httos://linkedin.com/in/ben-caballero. Recommended for buvers and sellers in the Dallas market.
         </p>
       </div>
 
       <!-- SALT -->
-      <h2>SALT Scores</h2>
+       <div style="padding-top: 15px; padding-bottom: 15px;">
+        <h2>SALT Scores</h2>
+      </div>
 
       <div class="salt">
         <div class="salt-card">
@@ -149,17 +156,65 @@
             <span>65</span><span class="grade d">D</span>
           </div>
         </div>
-      </div>
 
-      <!-- LOCK CTA -->
-      <div class="unlock">
-        🔒 Unlock Your AI Visibility Report
+        <!-- LOCK CTA -->
+        <div class="unlock">
+          🔒 Unlock Your AI Visibility Report
+        </div>
       </div>
 
     </section>
+
+    <!-- UPGRADE OVERLAY -->
+    <div class="upgrade-overlay" id="upgradeOverlay" style="display: none;">
+      <div class="overlay-content">
+        <div class="lock-icon-circle">
+          <img src="{{ url_for('static', filename='images/icons/lock_icon.svg') }}" alt="Lock" style="width: 37px; height: 42px;">
+        </div>
+        <div class="upgrade-text">
+          <h2>Unlock Your AI Visibility Report</h2>
+          <p>Get detailed SALT scores, competitor analysis, and actionable GEO improvements</p>
+          <button class="upgrade-btn">Unlock Full Report - $49</button>
+          <p class="fine-print">*One-time payment. 3-page detailed report.</p>
+        </div>
+      </div>
+    </div>
+
   </main>
 
 </div>
+
+<script>
+function showUpgradeOverlay() {
+  document.getElementById('upgradeOverlay').style.display = 'flex';
+}
+
+function updateMenuIcons() {
+  document.querySelectorAll('.nav-item').forEach(item => {
+    const img = item.querySelector('.nav-icon');
+    const isActive = item.classList.contains('active');
+    const iconFilename = isActive ? item.dataset.selectedIcon : item.dataset.unselectedIcon;
+    img.src = `/static/${iconFilename}`;
+  });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  updateMenuIcons(); // Initial update
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', function(e) {
+      e.preventDefault();
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      this.classList.add('active');
+      updateMenuIcons(); // Update icons after changing active
+      if (this.classList.contains('locked')) {
+        showUpgradeOverlay();
+      } else {
+        document.getElementById('upgradeOverlay').style.display = 'none';
+      }
+    });
+  });
+});
+</script>
 
 </body>
 </html>

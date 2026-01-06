@@ -83,6 +83,16 @@
 </div>
 
 <script>
+  // Check auth status on page load
+  fetch('/api/auth/status')
+    .then(response => response.json())
+    .then(data => {
+      if (data.logged_in) {
+        window.location.href = '/dashboard';
+      }
+    })
+    .catch(error => console.error('Error checking auth status:', error));
+
   document.getElementById("loginBtn").addEventListener("click", function () {
     const firstName = document.getElementById("firstName").value;
     const lastName = document.getElementById("lastName").value;
@@ -92,8 +102,31 @@
       alert("Please fill in all fields.");
       return;
     }
-
-    window.location.href = "/dashboard";
+    
+    // Call login API
+    fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        first_name: firstName,
+        last_name: lastName,
+        zipcode: zipcode
+      })
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        window.location.href = '/dashboard';
+      } else {
+        alert(data.error || 'Login failed');
+      }
+    })
+    .catch(error => {
+      console.error('Error during login:', error);
+      alert('Login failed. Please try again.');
+    });
   });
 </script>
 

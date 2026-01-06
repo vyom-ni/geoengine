@@ -48,20 +48,21 @@ def get_system():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Simple login - store name/email in session"""
+    """Simple login - store first name, last name, and zipcode in session"""
     data = request.get_json() or {}
-    name = data.get('name', '').strip()
-    email = data.get('email', '').strip()
-    
-    if not name or not email:
-        return jsonify({'error': 'Name and email are required'}), 400
-    
+    first_name = data.get('first_name', '').strip()
+    last_name = data.get('last_name', '').strip()
+    zipcode = data.get('zipcode', '').strip()
+
+    if not first_name or not last_name or not zipcode:
+        return jsonify({'error': 'First name, last name, and zipcode are required'}), 400
     # Check for admin credentials
-    is_admin = email.lower() == 'admin@gmail.com' and name.lower() == 'admin'
+    is_admin = first_name.lower() == 'admin' and last_name.lower() == 'admin'
     
     session['user'] = {
-        'name': name, 
-        'email': email, 
+        'first_name': first_name,
+        'last_name': last_name,
+        'zipcode': zipcode,
         'logged_in': True, 
         'paid': is_admin,  # Admin gets free access
         'is_admin': is_admin
