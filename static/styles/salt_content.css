@@ -1,0 +1,88 @@
+/* SALT Deep Dive Styles */
+
+.salt-deep-dive {
+  margin-top: 30px;
+}
+
+.salt-title {
+  font-family: Sora, sans-serif;
+  font-size: 24px;
+  font-weight: 700;
+  color: #172152;
+  margin-bottom: 20px;
+}
+
+.salt-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+}
+
+/* Card */
+.salt-detail-card {
+  background: #ffffff;
+  border: 1px solid rgba(23, 33, 82, 0.2);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
+}
+
+/* Header */
+.salt-card-header {
+  display: flex;
+  justify-content: space-between;
+  font-family: Inter, sans-serif;
+  font-size: 20px;
+  font-weight: 600;
+  color: #172152;
+}
+
+/* Progress bar */
+.salt-progress {
+  margin: 14px 0 6px;
+  height: 10px;
+  background: #f4f5f7;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.salt-progress-fill {
+  height: 100%;
+  background: #3d90ff;
+  border-radius: 10px;
+}
+
+/* Grade */
+.salt-grade {
+  font-family: Inter, sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  text-align: right;
+  margin-bottom: 12px;
+}
+
+.grade-a {
+  color: #2f9e75;
+}
+
+.grade-c {
+  color: #b4c000;
+}
+
+.grade-d {
+  color: #b4c000;
+}
+
+/* Bullet points */
+.salt-points {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.salt-points li {
+  font-family: Inter, sans-serif;
+  font-size: 15px;
+  color: rgba(89, 89, 89, 0.65);
+  margin-bottom: 6px;
+}

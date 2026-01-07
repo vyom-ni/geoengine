@@ -12,6 +12,10 @@
 
   <!-- Styles -->
   <link rel="stylesheet" href="{{ url_for('static', filename='styles/dashboard.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/dashboard_content.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/salt_content.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/roadmap_content.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/strategy_content.css') }}">
 </head>
 
 <body>
@@ -82,351 +86,22 @@
       <section class="content">
         <!-- DASHBOARD CONTENT -->
         <div id="dashboardContent">
-          <h1>Your Profile Dashboard</h1>
-
-          <!-- PROFILE CARD -->
-          <div class="card profile-card">
-            <div class="profile-left">
-              <img src="{{ url_for('static', filename='images/avatar.jpg') }}" class="avatar" />
-              <div style="display: flex; flex-direction: column; gap: 4px;">
-                <p style="color: #162456;">AI Visibility Report</p>
-                <h2 style="color: #162456;">Ben Caballero</h2>
-                <a href="#" style="color: #1624567f;">HomesUSA.com</a>
-              </div>
-            </div>
-
-            <div class="profile-score">
-              <div class="score" style="color: #162456;">83</div>
-              <div style="color: #16245693;">Overall Score</div>
-            </div>
-          </div>
-
-          <!-- STATS -->
-          <div class="stats">
-            <div class="stat" style="border-radius: 0px 0px 0px 20px;">
-              <span class="label">Visibility Tier</span>
-              <span class="value">B</span>
-            </div>
-            <div class="stat">
-              <span class="label">Market presence</span>
-              <span class="value">High</span>
-            </div>
-            <div class="stat" style="border-radius: 0px 0px 20px 0px;">
-              <span class="label">AI Discoverability</span>
-              <span class="value">Strong</span>
-            </div>
-          </div>
-
-          <!-- LEADERBOARD -->
-          <div style="padding-top: 15px; padding-bottom: 10px;">
-            <h2>Leaderboard</h2>
-          </div>
-          <div class="leaderboard">
-            <div class="lb-card"><span class="first-part">Top 99%</span> <span class="label">nationally</span></div>
-            <div class="lb-card"><span class="first-part">#1</span> <span class="label">in TX (158 agents)</span></div>
-            <div class="lb-card"><span class="first-part">#1</span> <span class="label">in Dallas (23 agents)</span>
-            </div>
-          </div>
-
-          <!-- EXEC SUMMARY -->
-          <div class="summary">
-            <h3>Executive Summary</h3>
-            <p>
-              Ben Caballero is a strong-tier real estate professional ranked #1 in TX and #1 in Dallas, placing them in
-              the top 99%
-              nationally. With 30 years of experience and $10B+ in career sales, they demonstrate strong market
-              expertise. Client
-              satisfaction is strong with a 4.7/5.0 rating across 51 reviews on Yelp. Notable achievement : Guinness
-              World Record Holder.
-              Specializing in New Construction properties, they operate from Dallas, TX. Connect via website :
-              https://homeusa.com
-              ,
-              linkedin : httos://linkedin.com/in/ben-caballero. Recommended for buvers and sellers in the Dallas market.
-            </p>
-          </div>
-
-          <!-- SALT -->
-          <div style="padding-top: 15px; padding-bottom: 15px;">
-            <h2>SALT Scores</h2>
-          </div>
-
-          <div class="salt">
-            <div class="salt-card">
-              <span class="label">Sentiment</span>
-              <div class="salt-score">
-                <span>99</span><span class="grade a">A</span>
-              </div>
-            </div>
-
-            <div class="salt-card">
-              <span class="label">Authority</span>
-              <div class="salt-score">
-                <span>99</span><span class="grade a">A</span>
-              </div>
-            </div>
-
-            <div class="salt-card">
-              <span class="label">Location</span>
-              <div class="salt-score">
-                <span>75</span><span class="grade c">C</span>
-              </div>
-            </div>
-
-            <div class="salt-card">
-              <span class="label">Trust</span>
-              <div class="salt-score">
-                <span>65</span><span class="grade d">D</span>
-              </div>
-            </div>
-
-            <!-- LOCK CTA -->
-            <div class="unlock">
-              🔒 Unlock Your AI Visibility Report
-            </div>
-          </div>
+          {% include 'dashboard_content.html' %}
         </div>
 
         <!-- SALT CONTENT -->
         <div id="saltContent" style="display: none;">
-          <div class="salt-deep-dive">
-
-            <h2 class="salt-title">SALT Deep Dive ( Gaps & Risks )</h2>
-
-            <div class="salt-grid">
-
-              <!-- Sentiment -->
-              <div class="salt-detail-card">
-                <div class="salt-card-header">
-                  <span>Sentiment</span>
-                  <span>99 / 100</span>
-                </div>
-
-                <div class="salt-progress">
-                  <div class="salt-progress-fill" style="width:99%"></div>
-                </div>
-
-                <div class="salt-grade grade-a">Grade A</div>
-
-                <ul class="salt-points">
-                  <li>✔ Rating : 4.7 / 5.0 on Yelp</li>
-                  <li>✔ Elite credibility tier</li>
-                </ul>
-              </div>
-
-              <!-- Authority -->
-              <div class="salt-detail-card">
-                <div class="salt-card-header">
-                  <span>Authority</span>
-                  <span>91 / 100</span>
-                </div>
-
-                <div class="salt-progress">
-                  <div class="salt-progress-fill" style="width:91%"></div>
-                </div>
-
-                <div class="salt-grade grade-a">Grade A</div>
-
-                <ul class="salt-points">
-                  <li>✔ Website : https://homesusa.com</li>
-                  <li>✔ Profile page available</li>
-                  <li>✔ Active on 4 social platforms</li>
-                  <li>✔ Good reviews : 51</li>
-                </ul>
-              </div>
-
-              <!-- Location Visibility -->
-              <div class="salt-detail-card">
-                <div class="salt-card-header">
-                  <span>Location Visibility</span>
-                  <span>75 / 100</span>
-                </div>
-
-                <div class="salt-progress">
-                  <div class="salt-progress-fill" style="width:75%"></div>
-                </div>
-
-                <div class="salt-grade grade-c">Grade C</div>
-
-                <ul class="salt-points">
-                  <li>✔ Market : Dallas</li>
-                  <li>✔ State : Texas</li>
-                  <li>✔ ZIP : 75209</li>
-                  <li>✔ Office location verified</li>
-                </ul>
-              </div>
-
-              <!-- Trustworthiness -->
-              <div class="salt-detail-card">
-                <div class="salt-card-header">
-                  <span>Trustworthiness</span>
-                  <span>65 / 100</span>
-                </div>
-
-                <div class="salt-progress">
-                  <div class="salt-progress-fill" style="width:65%"></div>
-                </div>
-
-                <div class="salt-grade grade-d">Grade D</div>
-
-                <ul class="salt-points">
-                  <li>✔ Active Texas license</li>
-                  <li>✔ Brokerage : HomesUSA.com</li>
-                  <li>✔ Verifies Identity</li>
-                  <li>✔ RealTrends Verified</li>
-                </ul>
-              </div>
-
-            </div>
-          </div>
+          {% include 'salt_content.html' %}
         </div>
 
         <!-- ROADMAP CONTENT -->
         <div id="roadmapContent" style="display: none;">
-          <div class="roadmap-deep-dive">
-
-            <h2 class="roadmap-title">Roadmap Deep Dive ( Gaps & Risks )</h2>
-
-            <div class="roadmap-grid">
-
-              <!-- Sentiment -->
-              <div class="roadmap-detail-card">
-                <div class="roadmap-card-header">
-                  <span>Sentiment</span>
-                  <span>99 / 100</span>
-                </div>
-
-                <div class="roadmap-progress">
-                  <div class="roadmap-progress-fill" style="width:99%"></div>
-                </div>
-
-                <div class="roadmap-grade grade-a">Grade A</div>
-
-                <ul class="roadmap-points">
-                  <li>✔ Rating : 4.7 / 5.0 on Yelp</li>
-                  <li>✔ Elite credibility tier</li>
-                </ul>
-              </div>
-
-              <!-- Authority -->
-              <div class="roadmap-detail-card">
-                <div class="roadmap-card-header">
-                  <span>Authority</span>
-                  <span>91 / 100</span>
-                </div>
-
-                <div class="roadmap-progress">
-                  <div class="roadmap-progress-fill" style="width:91%"></div>
-                </div>
-
-                <div class="roadmap-grade grade-a">Grade A</div>
-
-                <ul class="salt-points">
-                  <li>✔ Website : https://homesusa.com</li>
-                  <li>✔ Profile page available</li>
-                  <li>✔ Active on 4 social platforms</li>
-                  <li>✔ Good reviews : 51</li>
-                </ul>
-              </div>
-
-              <!-- Location Visibility -->
-              <div class="roadmap-detail-card">
-                <div class="roadmap-card-header">
-                  <span>Location Visibility</span>
-                  <span>75 / 100</span>
-                </div>
-
-                <div class="roadmap-progress">
-                  <div class="roadmap-progress-fill" style="width:75%"></div>
-                </div>
-
-                <div class="roadmap-grade grade-c">Grade C</div>
-
-                <ul class="salt-points">
-                  <li>✔ Market : Dallas</li>
-                  <li>✔ State : Texas</li>
-                  <li>✔ ZIP : 75209</li>
-                  <li>✔ Office location verified</li>
-                </ul>
-              </div>
-
-              <!-- Trustworthiness -->
-              <div class="roadmap-detail-card">
-                <div class="roadmap-card-header">
-                  <span>Trustworthiness</span>
-                  <span>65 / 100</span>
-                </div>
-
-                <div class="roadmap-progress">
-                  <div class="roadmap-progress-fill" style="width:65%"></div>
-                </div>
-
-                <div class="roadmap-grade grade-d">Grade D</div>
-
-                <ul class="salt-points">
-                  <li>✔ Active Texas license</li>
-                  <li>✔ Brokerage : HomesUSA.com</li>
-                  <li>✔ Verifies Identity</li>
-                  <li>✔ RealTrends Verified</li>
-                </ul>
-              </div>
-
-            </div>
-          </div>
+          {% include 'roadmap_content.html' %}
         </div>
 
         <!-- STRATEGY CONTENT -->
         <div id="strategyContent" style="display: none;">
-
-          <h2 class="strategy-title">AI Visibility Strategy</h2>
-          <p class="strategy-subtitle">
-            Step-by-step actions to improve your AI discoverability and authority
-          </p>
-
-          <div class="strategy-timeline">
-
-            <!-- PHASE 1 -->
-            <div class="strategy-card">
-              <div class="strategy-phase">Phase 1 · Foundation (0–30 Days)</div>
-              <ul>
-                <li>✔ Optimize website schema for AI indexing</li>
-                <li>✔ Verify profiles across major platforms</li>
-                <li>✔ Improve sentiment signals (reviews, mentions)</li>
-                <li>✔ Location consistency cleanup</li>
-              </ul>
-              <span class="impact high">High Impact</span>
-            </div>
-
-            <!-- PHASE 2 -->
-            <div class="strategy-card">
-              <div class="strategy-phase">Phase 2 · Authority (30–60 Days)</div>
-              <ul>
-                <li>✔ Publish authority-driven content</li>
-                <li>✔ Strengthen backlinks & citations</li>
-                <li>✔ Improve AI trust signals</li>
-                <li>✔ Social proof amplification</li>
-              </ul>
-              <span class="impact medium">Medium Impact</span>
-            </div>
-
-            <!-- PHASE 3 -->
-            <div class="strategy-card">
-              <div class="strategy-phase">Phase 3 · Market Dominance (60–90 Days)</div>
-              <ul>
-                <li>✔ GEO optimization for competitors</li>
-                <li>✔ Advanced AI entity recognition</li>
-                <li>✔ Featured snippet targeting</li>
-                <li>✔ AI-first content strategy</li>
-              </ul>
-              <span class="impact very-high">Very High Impact</span>
-            </div>
-
-          </div>
-
-          <!-- LOCKED CTA -->
-          <div class="strategy-lock">
-            🔒 Unlock your personalized AI Strategy to see detailed steps & priorities
-          </div>
-
+          {% include 'strategy_content.html' %}
         </div>
 
       </section>
@@ -452,6 +127,22 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', function () {
+      // Generate avatar initials
+      const userName = document.getElementById('userName').textContent.trim();
+      const avatarInitials = document.getElementById('avatarInitials');
+      
+      function getInitials(name) {
+        const words = name.trim().split(' ').filter(word => word.length > 0);
+        if (words.length >= 2) {
+          return (words[0][0] + words[1][0]).toUpperCase();
+        } else if (words.length === 1) {
+          return words[0][0].toUpperCase();
+        }
+        return '';
+      }
+      
+      avatarInitials.textContent = getInitials(userName);
+
       // Configuration
       const contentMap = {
         'Dashboard': 'dashboardContent',
@@ -535,29 +226,11 @@
         // Hide toggle overlay
         upgradeOverlay.style.display = 'none';
 
-        // Automatically switch to the SALT tab (implied user intent) or keep current behavior?
-        // Requirement says: "Once user clicks... all lock icons should be disabled"
-        // It's good UX to maybe stay where we are or switch to 'SALT' if that's what they wanted.
-        // For now, we simply unlock. The user can then click anywhere.
-
-        // Triggers a click on SALT to immediately show it? 
-        // "if salt menu is clicked then all the other content should be disabled and salt content should be enabled"
-        // Let's just unlock for now, as the user might want to click Roadmap or Strategy.
-        // Actually, often "Unlock" implies "Show me what I wanted". 
-        // Let's trigger a click on the SALT item since the button says "Unlock Full Report" (often associated with SALT key metrics)
-        // But strictly following "all lock icons disabled", we just do that.
-
-        // Optionally, trigger click on SALT if the overlay was triggered from there? 
-        // The requirement is specific about the state change.
-        // Let's force a click on the SALT tab to be helpful, as the button ID is `unlockSaltBtn`.
         const saltItem = Array.from(navItems).find(i => i.querySelector('span').textContent.trim() === 'SALT');
         if (saltItem) {
           saltItem.click();
         }
       });
-
-      // Close overlay helper (if we add a close button later)
-      // window.hideUpgradeOverlay = function() { upgradeOverlay.style.display = 'none'; }
     });
   </script>
 
