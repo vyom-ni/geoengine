@@ -46,8 +46,6 @@
               alt="SALT">
             <span>SALT</span>
           </div>
-          <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon"
-            alt="Locked">
         </a>
 
         <a class="nav-item locked" data-selected-icon="images/icons/sbar_roadmap_selected.svg"
@@ -59,7 +57,23 @@
           </div>
           <img src="{{ url_for('static', filename='images/icons/sidebar_lock_icon.svg') }}" class="lock-icon"
             alt="Locked">
+          <svg class="roadmap-dropdown-toggle" width="16" height="16" viewBox="0 0 16 16" fill="none" style="display: none;">
+            <path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </a>
+
+        <!-- Roadmap Dropdown Menu -->
+        <div class="roadmap-dropdown-menu" style="display: none;">
+          <a class="roadmap-dropdown-item" data-submenu="gaps">
+            <span>Gaps</span>
+          </a>
+          <a class="roadmap-dropdown-item" data-submenu="optimization">
+            <span>Optimization</span>
+          </a>
+          <a class="roadmap-dropdown-item" data-submenu="wins">
+            <span>Wins & Impact</span>
+          </a>
+        </div>
 
         <a class="nav-item locked" data-selected-icon="images/icons/sbar_strategy_selected.svg"
           data-unselected-icon="images/icons/sbar_strategy_unselected.svg">
@@ -116,8 +130,29 @@
           <div class="upgrade-text">
             <h2>Unlock Your AI Visibility Report</h2>
             <p>Get detailed SALT scores, competitor analysis, and actionable GEO improvements</p>
-            <button class="upgrade-btn" id="unlockSaltBtn">Unlock Full Report - $49</button>
+            <button class="upgrade-btn" id="unlockBtn">Unlock Full Report - $49</button>
             <p class="fine-print">*One-time payment. 3-page detailed report.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SALT UPGRADE OVERLAY -->
+      <div class="salt-upgrade-overlay" id="saltUpgradeOverlay" style="display: none;">
+        <div class="salt-overlay-wrapper">
+          <div class="salt-overlay-background">
+            <img src="{{ url_for('static', filename='images/background/tempImageWrqLOg.png') }}" alt="Background">
+          </div>
+          <div class="salt-overlay-content">
+            <div class="salt-overlay-inner">
+              <h2>Enter E-mail to view SALT scores</h2>
+              <div class="salt-overlay-form">
+                <div class="salt-form-group">
+                  <label>E-mail</label>
+                  <input type="email" placeholder="example@email.com" id="saltEmailInput">
+                </div>
+                <button class="salt-view-btn" id="saltViewBtn">View Leader board</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -152,8 +187,12 @@
       };
 
       const upgradeOverlay = document.getElementById('upgradeOverlay');
-      const unlockBtn = document.getElementById('unlockSaltBtn');
+      const saltUpgradeOverlay = document.getElementById('saltUpgradeOverlay');
+      const unlockBtn = document.getElementById('unlockBtn');
+      const saltViewBtn = document.getElementById('saltViewBtn');
       const navItems = document.querySelectorAll('.nav-item');
+      const roadmapDropdownMenu = document.querySelector('.roadmap-dropdown-menu');
+      const roadmapDropdownItems = document.querySelectorAll('.roadmap-dropdown-item');
       let isGlobalUnlocked = false;
 
       // Helper: Update Menu Icons based on active state
@@ -190,45 +229,175 @@
           e.preventDefault();
           const menuName = this.querySelector('span').textContent.trim();
 
-          // Check if item is locked
-          if (this.classList.contains('locked')) {
-            upgradeOverlay.style.display = 'flex';
-            return;
-          }
-
-          // If unlocked or not a locked item (like Dashboard)
-          navItems.forEach(i => i.classList.remove('active'));
+          // Set active state for all menu items first
+          navItems.forEach(i => {
+            i.classList.remove('active');
+            // Reset lock icons to default for inactive items
+            if (i.classList.contains('locked')) {
+              const lockIcon = i.querySelector('.lock-icon');
+              if (lockIcon) {
+                lockIcon.src = `/static/images/icons/sidebar_lock_icon.svg`;
+              }
+            }
+          });
           this.classList.add('active');
           updateMenuIcons();
 
-          // Switch content
+          // Handle Roadmap dropdown toggle
+          if (menuName === 'Roadmap' && !this.classList.contains('locked')) {
+            e.stopPropagation();
+            const isDropdownVisible = roadmapDropdownMenu.style.display === 'flex';
+            roadmapDropdownMenu.style.display = isDropdownVisible ? 'none' : 'flex';
+            switchContent('roadmapContent');
+            // Hide overlays
+            upgradeOverlay.style.display = 'none';
+            saltUpgradeOverlay.style.display = 'none';
+            return;
+          }
+
+          // Toggle lock icon to selected version for locked items
+          if (this.classList.contains('locked')) {
+            const lockIcon = this.querySelector('.lock-icon');
+            if (lockIcon) {
+              lockIcon.src = `/static/images/icons/sbar_lock_icon_selected.svg`;
+            }
+            
+            // Show SALT overlay ONLY if SALT is clicked, regular overlay for others
+            if (menuName.toUpperCase() === 'SALT') {
+              saltUpgradeOverlay.style.display = 'flex';
+              upgradeOverlay.style.display = 'none';
+            } else {
+              upgradeOverlay.style.display = 'flex';
+              saltUpgradeOverlay.style.display = 'none';
+            }
+            return;
+          }
+
+          // Switch content for unlocked items
           if (contentMap[menuName]) {
             switchContent(contentMap[menuName]);
           }
 
-          // Hide overlay if it was open (safety)
+          // Hide overlays and close roadmap dropdown when navigating to other items
           upgradeOverlay.style.display = 'none';
+          saltUpgradeOverlay.style.display = 'none';
+          if (menuName !== 'Roadmap') {
+            roadmapDropdownMenu.style.display = 'none';
+          }
         });
       });
 
-      // Unlock Button Click Handler
+      // Unlock Button Click Handler (for Roadmap and Strategy)
       unlockBtn.addEventListener('click', function () {
         isGlobalUnlocked = true;
 
-        // Remove 'locked' class from ALL nav items
+        // Remove 'locked' class from non-SALT nav items
         navItems.forEach(item => {
-          item.classList.remove('locked');
-          // Hide lock icon
-          const lockIcon = item.querySelector('.lock-icon');
-          if (lockIcon) lockIcon.style.display = 'none';
+          const menuName = item.querySelector('span').textContent.trim();
+          if (menuName !== 'SALT') {
+            item.classList.remove('locked');
+            // Hide lock icon
+            const lockIcon = item.querySelector('.lock-icon');
+            if (lockIcon) lockIcon.style.display = 'none';
+            
+            // Show dropdown toggle for Roadmap
+            if (menuName === 'Roadmap') {
+              const dropdownToggle = item.querySelector('.roadmap-dropdown-toggle');
+              if (dropdownToggle) dropdownToggle.style.display = 'block';
+            }
+          }
         });
 
         // Hide toggle overlay
         upgradeOverlay.style.display = 'none';
+        
+        // Automatically switch to Roadmap with Gaps content
+        const roadmapItem = Array.from(navItems).find(i => i.querySelector('span').textContent.trim() === 'Roadmap');
+        if (roadmapItem) {
+          navItems.forEach(i => i.classList.remove('active'));
+          roadmapItem.classList.add('active');
+          updateMenuIcons();
+          switchContent('roadmapContent');
+          roadmapDropdownMenu.style.display = 'flex';
+          
+          // Ensure Gaps is active
+          const gapsOption = Array.from(roadmapDropdownItems).find(item => item.dataset.submenu === 'gaps');
+          if (gapsOption) {
+            roadmapDropdownItems.forEach(i => i.classList.remove('active'));
+            gapsOption.classList.add('active');
+          }
+        }
+      });
 
+      // Roadmap Dropdown Item Click Handler
+      roadmapDropdownItems.forEach(item => {
+        item.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          
+          const submenu = this.dataset.submenu;
+          
+          // Set active state
+          roadmapDropdownItems.forEach(i => i.classList.remove('active'));
+          this.classList.add('active');
+          
+          // Switch to roadmap content (you can extend this to filter by submenu later)
+          navItems.forEach(i => i.classList.remove('active'));
+          const roadmapItem = Array.from(navItems).find(i => i.querySelector('span').textContent.trim() === 'Roadmap');
+          if (roadmapItem) {
+            roadmapItem.classList.add('active');
+            updateMenuIcons();
+          }
+          
+          switchContent('roadmapContent');
+          // DO NOT close the dropdown - keep it open
+        });
+      });
+
+      // Set Gaps as default active option
+      const gapsOption = Array.from(roadmapDropdownItems).find(item => item.dataset.submenu === 'gaps');
+      if (gapsOption) {
+        gapsOption.classList.add('active');
+      }
+
+      // SALT View Button Click Handler
+      saltViewBtn.addEventListener('click', function () {
+        const emailInput = document.getElementById('saltEmailInput');
+        if (emailInput.value.trim() === '') {
+          alert('Please enter a valid email address');
+          return;
+        }
+
+        // Hide the SALT overlay
+        saltUpgradeOverlay.style.display = 'none';
+
+        // Enable/unlock SALT content
         const saltItem = Array.from(navItems).find(i => i.querySelector('span').textContent.trim() === 'SALT');
         if (saltItem) {
-          saltItem.click();
+          // Remove locked class to enable SALT
+          saltItem.classList.remove('locked');
+          // Remove lock icon if present
+          const lockIcon = saltItem.querySelector('.lock-icon');
+          if (lockIcon) lockIcon.style.display = 'none';
+          
+          // Switch to SALT content
+          navItems.forEach(i => i.classList.remove('active'));
+          saltItem.classList.add('active');
+          updateMenuIcons();
+          switchContent('saltContent');
+        }
+      });
+
+      // Close overlays when clicking outside
+      upgradeOverlay.addEventListener('click', function (e) {
+        if (e.target === upgradeOverlay) {
+          upgradeOverlay.style.display = 'none';
+        }
+      });
+
+      saltUpgradeOverlay.addEventListener('click', function (e) {
+        if (e.target === saltUpgradeOverlay) {
+          saltUpgradeOverlay.style.display = 'none';
         }
       });
     });
