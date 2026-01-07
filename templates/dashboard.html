@@ -287,26 +287,30 @@
         });
       });
 
-      // Unlock Button Click Handler (for Roadmap and Strategy)
+      // Unlock Button Click Handler (for Roadmap, Strategy, and SALT)
       unlockBtn.addEventListener('click', function () {
         isGlobalUnlocked = true;
 
-        // Remove 'locked' class from non-SALT nav items
+        // Remove 'locked' class from ALL nav items including SALT
         navItems.forEach(item => {
+          item.classList.remove('locked');
+          // Hide lock icon
+          const lockIcon = item.querySelector('.lock-icon');
+          if (lockIcon) lockIcon.style.display = 'none';
+          
+          // Show dropdown toggle for Roadmap
           const menuName = item.querySelector('span').textContent.trim();
-          if (menuName !== 'SALT') {
-            item.classList.remove('locked');
-            // Hide lock icon
-            const lockIcon = item.querySelector('.lock-icon');
-            if (lockIcon) lockIcon.style.display = 'none';
-            
-            // Show dropdown toggle for Roadmap
-            if (menuName === 'Roadmap') {
-              const dropdownToggle = item.querySelector('.roadmap-dropdown-toggle');
-              if (dropdownToggle) dropdownToggle.style.display = 'block';
-            }
+          if (menuName === 'Roadmap') {
+            const dropdownToggle = item.querySelector('.roadmap-dropdown-toggle');
+            if (dropdownToggle) dropdownToggle.style.display = 'block';
           }
         });
+
+        // Hide the "View Full Leaderboard" button in dashboard
+        const leaderboardUnlock = document.getElementById('leaderboardUnlock');
+        if (leaderboardUnlock) {
+          leaderboardUnlock.style.display = 'none';
+        }
 
         // Hide toggle overlay
         upgradeOverlay.style.display = 'none';
@@ -387,6 +391,37 @@
           switchContent('saltContent');
         }
       });
+
+      // "View Full Leaderboard" button handler - DISABLED
+      // const unlockSaltBtn = document.getElementById('unlockSaltBtn');
+      // if (unlockSaltBtn) {
+      //   unlockSaltBtn.addEventListener('click', function (e) {
+      //     e.preventDefault();
+      //     isGlobalUnlocked = true;
+
+      //     // Unlock ALL nav items (SALT, Roadmap, Strategy)
+      //     navItems.forEach(item => {
+      //       item.classList.remove('locked');
+      //       // Hide lock icon
+      //       const lockIcon = item.querySelector('.lock-icon');
+      //       if (lockIcon) lockIcon.style.display = 'none';
+            
+      //       // Show dropdown toggle for Roadmap
+      //       const menuName = item.querySelector('span').textContent.trim();
+      //       if (menuName === 'Roadmap') {
+      //         const dropdownToggle = item.querySelector('.roadmap-dropdown-toggle');
+      //         if (dropdownToggle) dropdownToggle.style.display = 'block';
+      //       }
+      //     });
+
+      //     // Hide any overlays
+      //     upgradeOverlay.style.display = 'none';
+      //     saltUpgradeOverlay.style.display = 'none';
+          
+      //     // Stay on dashboard but show confirmation (optional)
+      //     console.log('All features unlocked!');
+      //   });
+      // }
 
       // Close overlays when clicking outside
       upgradeOverlay.addEventListener('click', function (e) {

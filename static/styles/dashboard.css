@@ -227,45 +227,27 @@ h1 {
 }
 
 .salt-overlay-wrapper {
-  position: relative;
-  width: 1183px;
-  height: 1024px;
-  background: #FFFFFF;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.salt-overlay-background {
-  position: absolute;
-  width: 1440px;
-  height: 1364px;
-  left: 0;
-  top: -86px;
-  overflow: hidden;
-  z-index: 0;
-}
-
-.salt-overlay-background img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.salt-overlay-content {
-  position: absolute;
-  width: 1183px;
-  height: 1024px;
-  left: 0;
-  top: 0;
-  background: rgba(255, 255, 255, 0.7);
-  backdrop-filter: blur(25px);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 332px 325px 421px;
-  gap: 10px;
-  z-index: 1;
+  gap: 20px;
+  max-width: 790px;
+  padding: 40px;
+}
+
+.salt-overlay-background {
+  display: none;
+}
+
+.salt-overlay-background img {
+  display: none;
+}
+
+.salt-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
 }
 
 .salt-overlay-inner {
@@ -273,8 +255,8 @@ h1 {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  width: 790px;
-  height: auto;
+  width: 100%;
+  max-width: 790px;
 }
 
 .salt-overlay-inner h2 {

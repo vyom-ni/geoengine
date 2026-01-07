@@ -181,6 +181,7 @@
   font-family: Sora;
   font-size: 24px;
   z-index: 1;
+  padding-top: 10px;
 }
 
 .unlock-btn {
@@ -207,6 +208,10 @@
   font-size: 16px;
   line-height: 19px;
   color: #FFFFFF;
+  cursor: pointer;
+  
+  /* Ensure vertical centering */
+  align-self: center;
 
   cursor: pointer;
   
