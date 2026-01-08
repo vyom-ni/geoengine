@@ -394,12 +394,7 @@ h1 {
 
 .roadmap-dropdown-item:first-child {
   padding-top: 16px;
-  color: #FFFFFF;
   cursor: default;
-}
-
-.roadmap-dropdown-item:not(:first-child) {
-  font-weight: 400;
 }
 
 .roadmap-dropdown-item:last-child {
