@@ -291,6 +291,10 @@
       unlockBtn.addEventListener('click', function () {
         isGlobalUnlocked = true;
 
+        // Get the currently active menu item before unlocking
+        const activeItem = document.querySelector('.nav-item.active');
+        const activeMenuName = activeItem ? activeItem.querySelector('span').textContent.trim() : null;
+
         // Remove 'locked' class from ALL nav items including SALT
         navItems.forEach(item => {
           item.classList.remove('locked');
@@ -315,20 +319,19 @@
         // Hide toggle overlay
         upgradeOverlay.style.display = 'none';
         
-        // Automatically switch to Roadmap with Gaps content
-        const roadmapItem = Array.from(navItems).find(i => i.querySelector('span').textContent.trim() === 'Roadmap');
-        if (roadmapItem) {
-          navItems.forEach(i => i.classList.remove('active'));
-          roadmapItem.classList.add('active');
-          updateMenuIcons();
-          switchContent('roadmapContent');
-          roadmapDropdownMenu.style.display = 'flex';
+        // Stay on the current active menu item instead of forcing Roadmap
+        if (activeMenuName && contentMap[activeMenuName]) {
+          switchContent(contentMap[activeMenuName]);
           
-          // Ensure Gaps is active
-          const gapsOption = Array.from(roadmapDropdownItems).find(item => item.dataset.submenu === 'gaps');
-          if (gapsOption) {
-            roadmapDropdownItems.forEach(i => i.classList.remove('active'));
-            gapsOption.classList.add('active');
+          // If it's Roadmap, show the dropdown and default to Gaps
+          if (activeMenuName === 'Roadmap') {
+            roadmapDropdownMenu.style.display = 'flex';
+            const gapsOption = Array.from(roadmapDropdownItems).find(item => item.dataset.submenu === 'gaps');
+            if (gapsOption) {
+              roadmapDropdownItems.forEach(i => i.classList.remove('active'));
+              gapsOption.classList.add('active');
+              toggleRoadmapSection('gaps');
+            }
           }
         }
       });
@@ -354,9 +357,38 @@
           }
           
           switchContent('roadmapContent');
+          
+          // Toggle roadmap sections based on submenu
+          toggleRoadmapSection(submenu);
+          
           // DO NOT close the dropdown - keep it open
         });
       });
+
+      // Function to toggle roadmap sections
+      function toggleRoadmapSection(submenu) {
+        const gapsSection = document.querySelector('.gaps-section');
+        const optimizationsSection = document.querySelector('.optimizations-section');
+        const winsSection = document.querySelector('.wins-section');
+        
+        // Hide all sections first
+        if (gapsSection) gapsSection.style.display = 'none';
+        if (optimizationsSection) optimizationsSection.style.display = 'none';
+        if (winsSection) winsSection.style.display = 'none';
+        
+        // Show the selected section
+        switch(submenu) {
+          case 'gaps':
+            if (gapsSection) gapsSection.style.display = 'block';
+            break;
+          case 'optimization':
+            if (optimizationsSection) optimizationsSection.style.display = 'block';
+            break;
+          case 'wins':
+            if (winsSection) winsSection.style.display = 'block';
+            break;
+        }
+      }
 
       // Set Gaps as default active option
       const gapsOption = Array.from(roadmapDropdownItems).find(item => item.dataset.submenu === 'gaps');

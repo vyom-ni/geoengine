@@ -1,91 +1,76 @@
 /* Strategy Content Styles */
 
 .strategy-title {
-  font-family: Sora, sans-serif;
-  font-size: 26px;
+  font-family: 'Sora', sans-serif;
+  font-style: normal;
   font-weight: 700;
+  font-size: 32px;
+  line-height: 40px;
   color: #172152;
-  margin-bottom: 6px;
+  margin-bottom: 20px;
 }
 
-.strategy-subtitle {
-  font-family: Inter, sans-serif;
-  font-size: 16px;
-  color: rgba(23, 33, 82, 0.6);
-  margin-bottom: 24px;
+.strategy-container {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
 }
 
-.strategy-timeline {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
-}
-
-/* Strategy Card */
-.strategy-card {
-  background: #ffffff;
+/* Strategy Item */
+.strategy-item {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 12px 10px;
+  gap: 10px;
+  background: #FFFFFF;
   border: 1px solid rgba(23, 33, 82, 0.2);
-  border-radius: 12px;
-  padding: 20px;
   box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
-  position: relative;
+  border-radius: 10px;
 }
 
-.strategy-phase {
-  font-family: Inter, sans-serif;
-  font-size: 18px;
-  font-weight: 700;
-  color: #172152;
-  margin-bottom: 12px;
+.strategy-arrow {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.strategy-card ul {
-  padding-left: 18px;
-  margin: 0;
+.strategy-arrow svg {
+  width: 19px;
+  height: 19px;
 }
 
-.strategy-card li {
-  font-family: Inter, sans-serif;
-  font-size: 15px;
-  color: rgba(89, 89, 89, 0.75);
-  margin-bottom: 8px;
+.strategy-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 5px;
+  flex: 1;
 }
 
-/* Impact badge */
-.impact {
-  position: absolute;
-  bottom: 14px;
-  right: 14px;
-  font-size: 13px;
+.strategy-item-title {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
   font-weight: 600;
-  padding: 6px 10px;
-  border-radius: 20px;
-}
-
-.impact.high {
-  background: rgba(61, 144, 255, 0.15);
-  color: #3d90ff;
-}
-
-.impact.medium {
-  background: rgba(180, 192, 0, 0.15);
-  color: #b4c000;
-}
-
-.impact.very-high {
-  background: rgba(47, 158, 117, 0.15);
-  color: #2f9e75;
-}
-
-/* Lock CTA */
-.strategy-lock {
-  margin-top: 30px;
-  padding: 18px;
-  border-radius: 12px;
-  background: #f4f5f7;
-  text-align: center;
-  font-family: Inter, sans-serif;
   font-size: 16px;
-  font-weight: 600;
+  line-height: 19px;
   color: #172152;
+  width: 100%;
+}
+
+.strategy-item-description {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 19px;
+  color: rgba(23, 33, 82, 0.6);
+  width: 100%;
 }

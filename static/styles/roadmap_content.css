@@ -1,4 +1,429 @@
 /* Roadmap Deep Dive Styles */
+.roadmap-deep-dive {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+  width: 100%;
+  max-width: 1183px;
+  margin: 0 auto;
+}
+
+/* Gaps Section */
+.gaps-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 20px;
+  width: 100%;
+  max-width: 1078px;
+}
+
+/* Gaps Header */
+.gaps-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 0;
+  gap: 16px;
+  width: auto;
+  height: 40px;
+}
+
+/* Gaps Title */
+.gaps-title {
+  font-family: 'Sora', sans-serif;
+  font-style: normal;
+  font-weight: 700;
+  font-size: 32px;
+  line-height: 40px;
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: #172152;
+  margin: 0;
+}
+
+/* Gaps Content */
+.gaps-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 12px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Gaps Subtitle */
+.gaps-subtitle {
+  font-family: 'Sora', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 24px;
+  line-height: 30px;
+  color: #172152;
+  margin: 0;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Gaps List */
+.gaps-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 12px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Gap Item */
+.gap-item {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 12px 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: 67px;
+  background: #FFFBFB;
+  border: 1px solid rgba(191, 76, 47, 0.2);
+  box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  align-self: stretch;
+}
+
+/* Gap Icon */
+.gap-icon {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  flex-shrink: 0;
+}
+
+/* Gap Text Container */
+.gap-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0;
+  gap: 5px;
+  flex: 1;
+  width: 100%;
+}
+
+/* Gap Heading */
+.gap-heading {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 19px;
+  color: #BF4C2F;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Gap Description */
+.gap-description {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 19px;
+  display: flex;
+  align-items: center;
+  color: rgba(191, 76, 47, 0.8);
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Optimizations Section */
+.optimizations-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 20px;
+  width: 100%;
+  max-width: 1078px;
+}
+
+/* Optimizations Content */
+.optimizations-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 12px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Optimizations Subtitle */
+.optimizations-subtitle {
+  font-family: 'Sora', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 24px;
+  line-height: 30px;
+  color: #172152;
+  margin: 0;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Optimizations List */
+.optimizations-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 12px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Optimization Item */
+.optimization-item {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 12px 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: 67px;
+  background: #FFFDF3;
+  border: 1px solid rgba(166, 146, 69, 0.2);
+  box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  align-self: stretch;
+}
+
+/* Optimization Icon */
+.optimization-icon {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  flex-shrink: 0;
+}
+
+/* Optimization Text Container */
+.optimization-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0;
+  gap: 5px;
+  flex: 1;
+  width: 100%;
+}
+
+/* Optimization Heading */
+.optimization-heading {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 19px;
+  color: #A69245;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Optimization Description */
+.optimization-description {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 19px;
+  display: flex;
+  align-items: center;
+  color: rgba(166, 146, 69, 0.8);
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Wins Section */
+.wins-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 20px;
+  width: 100%;
+  max-width: 1078px;
+}
+
+/* Wins Content */
+.wins-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding: 0;
+  gap: 32px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Wins Subtitle */
+.wins-subtitle {
+  font-family: 'Sora', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 24px;
+  line-height: 30px;
+  color: #172152;
+  margin: 0;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Wins List */
+.wins-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 12px;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Win Item */
+.win-item {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 12px 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: 67px;
+  background: #F2FFF9;
+  border: 1px solid rgba(56, 137, 74, 0.2);
+  box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  align-self: stretch;
+}
+
+/* Win Icon */
+.win-icon {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  flex-shrink: 0;
+}
+
+/* Win Text Container */
+.win-text {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 0;
+  gap: 5px;
+  flex: 1;
+  width: 100%;
+}
+
+/* Win Heading */
+.win-heading {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 19px;
+  color: #38894A;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Win Description */
+.win-description {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 19px;
+  display: flex;
+  align-items: center;
+  color: rgba(56, 137, 74, 0.8);
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Impact Item */
+.impact-item {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 12px 10px;
+  gap: 10px;
+  width: 100%;
+  min-height: 143px;
+  background: #FFFFFF;
+  border: 1px solid rgba(23, 33, 82, 0.2);
+  box-shadow: 4px 4px 20px rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  align-self: stretch;
+}
+
+/* Impact Icon */
+.impact-icon {
+  width: 19px;
+  height: 19px;
+  flex: none;
+  flex-shrink: 0;
+}
+
+/* Impact Text Container */
+.impact-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 0;
+  gap: 5px;
+  flex: 1;
+  width: 100%;
+}
+
+/* Impact Heading */
+.impact-heading {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 19px;
+  color: #172152;
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Impact Description */
+.impact-description {
+  font-family: 'Inter', sans-serif;
+  font-style: normal;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 19px;
+  display: flex;
+  align-items: center;
+  color: rgba(23, 33, 82, 0.8);
+  width: 100%;
+  align-self: stretch;
+}
+
+/* Old Roadmap Styles */
 .roadmap-title {
   font-family: Sora, sans-serif;
   font-size: 24px;
