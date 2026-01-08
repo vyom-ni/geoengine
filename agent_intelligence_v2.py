@@ -63,7 +63,7 @@ class AgentProfile:
 class GeminiAnalyzer:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
     
     def analyze_agent(self, profile: AgentProfile, leaderboard: Dict = None) -> Dict:
         profile_dict = {k: v for k, v in asdict(profile).items() if v not in (None, "", 0, {})}
@@ -102,9 +102,13 @@ Return ONLY valid JSON."""
             if text.startswith('```json'): text = text[7:]
             if text.startswith('```'): text = text[3:]
             if text.endswith('```'): text = text[:-3]
-            return json.loads(text.strip())
+            parsed = json.loads(text.strip())
+            return parsed
+        except json.JSONDecodeError as je:
+            return self._fallback(profile, leaderboard)
         except Exception as e:
-            print(f"Gemini error: {e}")
+            import traceback
+            traceback.print_exc()     
             return self._fallback(profile, leaderboard)
     
     def _fallback(self, p: AgentProfile, lb: Dict = None) -> Dict:
@@ -348,10 +352,16 @@ class AgentIntelligenceSystem:
         leaderboard = self.db.get_leaderboard_context(profile.agent_id)
         
         if self.analyzer:
+            print(f"\n🔑 GEMINI API KEY FOUND - Using LLM analysis")
             analysis = self.analyzer.analyze_agent(profile, leaderboard)
         else:
+            print(f"\n{'='*60}")
+            print(f"⚠️  NO GEMINI API KEY - Using FALLBACK (no LLM)")
+            print(f"📊 Generating algorithmic analysis for: {profile.full_name}")
+            print(f"{'='*60}\n")
             temp = GeminiAnalyzer.__new__(GeminiAnalyzer)
             analysis = temp._fallback(profile, leaderboard)
+            print(f"✅ FALLBACK ANALYSIS COMPLETE (no AI used)\n")
         
         return {
             "agent": {
