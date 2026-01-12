@@ -260,35 +260,87 @@ class AgentDatabase:
         self._compute_rankings()
     
     def _compute_rankings(self):
-        self.df['rating_rank'] = self.df['Average_Rating'].rank(ascending=False, method='min')
-        self.df['review_rank'] = self.df['Total_Reviews'].rank(ascending=False, method='min')
-        self.df['experience_rank'] = self.df['Years_Experience'].rank(ascending=False, method='min')
-        self.df['credibility_rank'] = self.df['Credibility_Score'].rank(ascending=False, method='min')
+        # Ensure numeric columns exist and handle NaN values
+        for col in ['Average_Rating', 'Total_Reviews', 'Years_Experience', 'Credibility_Score']:
+            if col not in self.df.columns:
+                self.df[col] = 0
+            self.df[col] = pd.to_numeric(self.df[col], errors='coerce').fillna(0)
+        
+        self.df['rating_rank'] = self.df['Average_Rating'].rank(ascending=False, method='min', na_option='bottom')
+        self.df['review_rank'] = self.df['Total_Reviews'].rank(ascending=False, method='min', na_option='bottom')
+        self.df['experience_rank'] = self.df['Years_Experience'].rank(ascending=False, method='min', na_option='bottom')
+        self.df['credibility_rank'] = self.df['Credibility_Score'].rank(ascending=False, method='min', na_option='bottom')
+    
+    def _safe_int(self, val, default=1):
+        """Safely convert a value to int, handling NaN and None"""
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return default
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
     
     def get_leaderboard_context(self, agent_id: str) -> Dict:
-        agent = self.df[self.df['Agent_ID'] == agent_id]
-        if agent.empty: return {}
-        agent = agent.iloc[0]
-        total = len(self.df)
-        
-        state_df = self.df[self.df['State'] == agent['State']]
-        state_ranks = state_df['Credibility_Score'].rank(ascending=False, method='min')
-        state_rank = int(state_ranks.get(agent.name, 1))
-        
-        city_df = self.df[self.df['City'] == agent['City']]
-        city_ranks = city_df['Credibility_Score'].rank(ascending=False, method='min')
-        city_rank = int(city_ranks.get(agent.name, 1))
-        
-        return {
-            'total_agents': total,
-            'rating_rank': int(agent['rating_rank']),
-            'review_rank': int(agent['review_rank']),
-            'experience_rank': int(agent['experience_rank']),
-            'credibility_rank': int(agent['credibility_rank']),
-            'percentile': round((1 - agent['credibility_rank']/total)*100, 1),
-            'state_rank': state_rank, 'state_total': len(state_df),
-            'city_rank': city_rank, 'city_total': len(city_df)
-        }
+        try:
+            # Try to match agent_id with different types
+            agent = self.df[self.df['Agent_ID'] == agent_id]
+            if agent.empty:
+                # Try matching as string
+                agent = self.df[self.df['Agent_ID'].astype(str) == str(agent_id)]
+            if agent.empty:
+                print(f"⚠️ No agent found with ID: {agent_id}")
+                return {}
+            
+            agent = agent.iloc[0]
+            total = len(self.df)
+            
+            # Safe access to state/city
+            state = agent.get('State', '') if hasattr(agent, 'get') else agent['State'] if 'State' in agent.index else ''
+            city = agent.get('City', '') if hasattr(agent, 'get') else agent['City'] if 'City' in agent.index else ''
+            
+            # Handle state ranking
+            state_rank = 1
+            state_total = 0
+            if state and not pd.isna(state):
+                state_df = self.df[self.df['State'] == state]
+                state_total = len(state_df)
+                if not state_df.empty:
+                    state_ranks = state_df['Credibility_Score'].rank(ascending=False, method='min', na_option='bottom')
+                    state_rank = self._safe_int(state_ranks.get(agent.name, 1), 1)
+            
+            # Handle city ranking
+            city_rank = 1
+            city_total = 0
+            if city and not pd.isna(city):
+                city_df = self.df[self.df['City'] == city]
+                city_total = len(city_df)
+                if not city_df.empty:
+                    city_ranks = city_df['Credibility_Score'].rank(ascending=False, method='min', na_option='bottom')
+                    city_rank = self._safe_int(city_ranks.get(agent.name, 1), 1)
+            
+            # Safe access to rank columns
+            rating_rank = self._safe_int(agent.get('rating_rank') if hasattr(agent, 'get') else agent['rating_rank'], 1)
+            review_rank = self._safe_int(agent.get('review_rank') if hasattr(agent, 'get') else agent['review_rank'], 1)
+            experience_rank = self._safe_int(agent.get('experience_rank') if hasattr(agent, 'get') else agent['experience_rank'], 1)
+            credibility_rank = self._safe_int(agent.get('credibility_rank') if hasattr(agent, 'get') else agent['credibility_rank'], 1)
+            
+            percentile = round((1 - credibility_rank/total)*100, 1) if total > 0 else 0
+            
+            return {
+                'total_agents': total,
+                'rating_rank': rating_rank,
+                'review_rank': review_rank,
+                'experience_rank': experience_rank,
+                'credibility_rank': credibility_rank,
+                'percentile': percentile,
+                'state_rank': state_rank,
+                'state_total': state_total,
+                'city_rank': city_rank,
+                'city_total': city_total
+            }
+        except Exception as e:
+            print(f"Error in get_leaderboard_context: {e}")
+            return {}
     
     def search(self, query: str) -> List[Dict]:
         q = query.lower().strip()
@@ -314,27 +366,82 @@ class AgentDatabase:
         return agents
     
     def record_to_profile(self, record: Dict) -> AgentProfile:
-        def g(k, d=None): v = record.get(k, d); return d if pd.isna(v) else v
-        zip_code = str(g('ZIP_Code', ''))
+        def g(k, d=None):
+            """Get value from record, handling NaN and None"""
+            v = record.get(k, d)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return d
+            return v
+        
+        def g_int(k, d=0):
+            """Get integer value, safely handling NaN"""
+            v = g(k, d)
+            if v is None or v == '' or (isinstance(v, float) and pd.isna(v)):
+                return d
+            try:
+                return int(float(v))
+            except (ValueError, TypeError):
+                return d
+        
+        def g_float(k, d=0.0):
+            """Get float value, safely handling NaN"""
+            v = g(k, d)
+            if v is None or v == '' or (isinstance(v, float) and pd.isna(v)):
+                return d
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                return d
+        
+        def g_str(k, d=''):
+            """Get string value, safely handling NaN"""
+            v = g(k, d)
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return d
+            return str(v) if v else d
+        
+        zip_code = g_str('ZIP_Code', '')
         lat, lng = get_coordinates_from_zip(zip_code)
+        
         return AgentProfile(
-            agent_id=g('Agent_ID',''), full_name=g('Full_Name',''), license_number=g('License_Number',''),
-            license_status=g('License_Status',''), jurisdiction=g('Jurisdiction',''),
-            city=g('City',''), state=g('State',''), zip_code=zip_code, office_address=g('Office_Address',''),
-            latitude=lat, longitude=lng, brokerage_name=g('Brokerage_Name',''),
-            profile_url=g('Profile_URL',''), website=g('Website_Links',''),
-            instagram_url=g('Instagram_URL',''), facebook_url=g('Facebook_URL',''),
-            twitter_url=g('Twitter_URL',''), linkedin_url=g('LinkedIn_URL',''),
-            average_rating=g('Average_Rating',0) or 0, total_reviews=g('Total_Reviews',0) or 0,
-            review_text=g('Review_Text',''), review_platform=g('Review_Platform',''),
-            bio_text=g('Bio_Text',''), phone_number=g('Phone_Number',''),
-            profile_image_url=g('Profile_Image_URL',''), years_experience=g('Years_Experience',0) or 0,
-            specialization=g('Specialization',''), career_sales=g('Career_Sales',''),
-            industry_ranking=g('Industry_Ranking',''), credibility_score=g('Credibility_Score',0) or 0,
-            credibility_tier=g('Credibility_Tier',''), verified_realtrends=g('Verified_RealTrends',''),
-            follower_count=g('Follower_Count',0) or 0, verification_badge=g('Verification_Badge',''),
-            media_mentions_count=g('Media_Mentions_Count',0) or 0, sample_listing_url=g('Sample_Listing_URL',''),
-            team_name=g('Team_Name',''), observation_timestamp=str(g('Observation_Timestamp',''))
+            agent_id=g_str('Agent_ID', ''),
+            full_name=g_str('Full_Name', ''),
+            license_number=g_str('License_Number', ''),
+            license_status=g_str('License_Status', ''),
+            jurisdiction=g_str('Jurisdiction', ''),
+            city=g_str('City', ''),
+            state=g_str('State', ''),
+            zip_code=zip_code,
+            office_address=g_str('Office_Address', ''),
+            latitude=lat,
+            longitude=lng,
+            brokerage_name=g_str('Brokerage_Name', ''),
+            profile_url=g_str('Profile_URL', ''),
+            website=g_str('Website_Links', ''),
+            instagram_url=g_str('Instagram_URL', ''),
+            facebook_url=g_str('Facebook_URL', ''),
+            twitter_url=g_str('Twitter_URL', ''),
+            linkedin_url=g_str('LinkedIn_URL', ''),
+            average_rating=g_float('Average_Rating', 0.0),
+            total_reviews=g_int('Total_Reviews', 0),
+            review_text=g_str('Review_Text', ''),
+            review_platform=g_str('Review_Platform', ''),
+            bio_text=g_str('Bio_Text', ''),
+            phone_number=g_str('Phone_Number', ''),
+            profile_image_url=g_str('Profile_Image_URL', ''),
+            years_experience=g_int('Years_Experience', 0),
+            specialization=g_str('Specialization', ''),
+            career_sales=g_str('Career_Sales', ''),
+            industry_ranking=g_str('Industry_Ranking', ''),
+            credibility_score=g_int('Credibility_Score', 0),
+            credibility_tier=g_str('Credibility_Tier', ''),
+            verified_realtrends=g_str('Verified_RealTrends', ''),
+            follower_count=g_int('Follower_Count', 0),
+            verification_badge=g_str('Verification_Badge', ''),
+            media_mentions_count=g_int('Media_Mentions_Count', 0),
+            sample_listing_url=g_str('Sample_Listing_URL', ''),
+            team_name=g_str('Team_Name', ''),
+            observation_timestamp=g_str('Observation_Timestamp', '')
         )
 
 
@@ -350,6 +457,14 @@ class AgentIntelligenceSystem:
         record = results[0]
         profile = self.db.record_to_profile(record)
         leaderboard = self.db.get_leaderboard_context(profile.agent_id)
+        
+        # Debug logging
+        print(f"📊 Agent: {profile.full_name} (ID: {profile.agent_id})")
+        print(f"📍 Location: {profile.city}, {profile.state}")
+        if leaderboard:
+            print(f"🏆 Leaderboard: State #{leaderboard.get('state_rank')}/{leaderboard.get('state_total')}, City #{leaderboard.get('city_rank')}/{leaderboard.get('city_total')}")
+        else:
+            print(f"⚠️ Leaderboard context is empty!")
         
         if self.analyzer:
             print(f"\n🔑 GEMINI API KEY FOUND - Using LLM analysis")
