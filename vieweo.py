@@ -2384,7 +2384,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Vieweo - AI Visibility Platform')
     parser.add_argument('--port', '-p', type=int, default=int(os.environ.get('PORT', 8080)), help='Port to run on')
-    parser.add_argument('--host', '-H', default='127.0.0.1', help='Host to bind to')
+    parser.add_argument('--host', '-H', default='0.0.0.0', help='Host to bind to')
     parser.add_argument('--debug', '-d', action='store_true', help='Enable debug mode')
     args = parser.parse_args()
     
