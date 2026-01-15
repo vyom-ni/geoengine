@@ -1,16 +1,29 @@
 """
 Real Estate Agent Intelligence System v2 - ENHANCED
-Powered by Google Gemini + RAG with detailed executive summaries and leaderboard rankings
+Powered by Google Gemini / OpenAI + RAG with detailed executive summaries and leaderboard rankings
 """
 
 import pandas as pd
 import json
 import os
+import argparse
 from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
+import random
 
-import google.generativeai as genai
+# Try to import AI libraries
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # Extended ZIP coordinates for better map coverage
 ZIP_COORDS = {
@@ -60,91 +73,476 @@ class AgentProfile:
     observation_timestamp: str = ""; web_enrichment: Dict = field(default_factory=dict)
 
 
-class GeminiAnalyzer:
-    def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+class AIAnalyzer:
+    """Unified AI Analyzer supporting OpenAI and Gemini"""
     
-    def analyze_agent(self, profile: AgentProfile, leaderboard: Dict = None) -> Dict:
-        profile_dict = {k: v for k, v in asdict(profile).items() if v not in (None, "", 0, {})}
+    def __init__(self, openai_api_key: Optional[str] = None, gemini_api_key: Optional[str] = None):
+        self.openai_client = None
+        self.gemini_model = None
+        self.active_llm = None
         
-        lb_info = ""
-        if leaderboard:
-            lb_info = f"""
-LEADERBOARD (Database of {leaderboard.get('total_agents', 0)} agents):
-- Overall Rank: #{leaderboard.get('credibility_rank', 'N/A')} (Top {leaderboard.get('percentile', 'N/A')}%)
-- Rating Rank: #{leaderboard.get('rating_rank', 'N/A')}
-- Reviews Rank: #{leaderboard.get('review_rank', 'N/A')}
-- State Rank ({profile.state}): #{leaderboard.get('state_rank', 'N/A')} of {leaderboard.get('state_total', 'N/A')}
-- City Rank ({profile.city}): #{leaderboard.get('city_rank', 'N/A')} of {leaderboard.get('city_total', 'N/A')}
-"""
+        # Prefer OpenAI if available
+        if openai_api_key and OPENAI_AVAILABLE:
+            try:
+                self.openai_client = openai.OpenAI(api_key=openai_api_key)
+                self.active_llm = 'openai'
+                print("✅ OpenAI client initialized")
+            except Exception as e:
+                print(f"⚠️ OpenAI init failed: {e}")
+        
+        # Fallback to Gemini
+        if not self.openai_client and gemini_api_key and GEMINI_AVAILABLE:
+            try:
+                genai.configure(api_key=gemini_api_key)  # type: ignore
+                self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')  # type: ignore
+                self.active_llm = 'gemini'
+                print("✅ Gemini client initialized")
+            except Exception as e:
+                print(f"⚠️ Gemini init failed: {e}")
+        
+        if not self.active_llm:
+            print("⚠️ No LLM available - using algorithmic scoring only")
+    
+    def analyze_agent(self, profile: AgentProfile, leaderboard: Optional[Dict] = None) -> Dict:
+        """
+        Main analysis method - ALWAYS uses algorithmic SALT scores for consistency,
+        then enhances with LLM insights if available.
+        """
+        # ALWAYS calculate SALT scores algorithmically (reliable & consistent)
+        salt_analysis = self._calculate_salt_scores(profile, leaderboard)
+        
+        # Calculate LLM-specific visibility scores
+        llm_scores = self._calculate_llm_visibility_scores(profile, salt_analysis)
+        salt_analysis['llm_visibility_scores'] = llm_scores
+        
+        # Optionally enhance with LLM insights (recommendations, summaries)
+        if self.active_llm:
+            try:
+                llm_insights = self._get_llm_insights(profile, salt_analysis, leaderboard)
+                # Merge LLM insights but DON'T override SALT scores
+                if llm_insights:
+                    # Only take non-score insights from LLM
+                    for key in ['recommendations', 'profile_analysis', 'competitive_insights']:
+                        if key in llm_insights and llm_insights[key]:
+                            salt_analysis[key] = llm_insights[key]
+            except Exception as e:
+                print(f"⚠️ LLM enhancement failed (using base analysis): {e}")
+        
+        return salt_analysis
+    
+    def _calculate_llm_visibility_scores(self, p: AgentProfile, analysis: Dict) -> Dict:
+        """
+        Calculate visibility scores for different LLMs based on their known preferences.
+        Each LLM has different weights for various factors.
+        """
+        scores = analysis.get('scores', {})
+        semantic = scores.get('semantic', {}).get('score', 0)
+        authority = scores.get('authority', {}).get('score', 0)
+        location = scores.get('location', {}).get('score', 0)
+        trust = scores.get('trust', {}).get('score', 0)
+        
+        # Count digital presence factors
+        platforms = sum([1 for x in [p.instagram_url, p.facebook_url, p.twitter_url, p.linkedin_url] if x])
+        has_website = 1 if p.website else 0
+        review_factor = min(p.total_reviews / 100, 1.0)  # Normalize to 0-1
+        rating_factor = (p.average_rating - 3) / 2 if p.average_rating >= 3 else 0  # 3-5 -> 0-1
+        
+        # ChatGPT (OpenAI) - Values structured data, reviews, clear identity
+        # Weights: Semantic 30%, Authority 25%, Trust 30%, Location 15%
+        chatgpt_score = int(
+            semantic * 0.30 + 
+            authority * 0.25 + 
+            trust * 0.30 + 
+            location * 0.15 +
+            (review_factor * 5) +  # Bonus for reviews
+            (rating_factor * 5)     # Bonus for high ratings
+        )
+        
+        # Perplexity - Values web presence, citations, recent content
+        # Weights: Authority 35%, Location 25%, Semantic 25%, Trust 15%
+        perplexity_score = int(
+            authority * 0.35 + 
+            location * 0.25 + 
+            semantic * 0.25 + 
+            trust * 0.15 +
+            (has_website * 8) +     # Strong bonus for website
+            (platforms * 2)          # Bonus for each platform
+        )
+        
+        # Claude (Anthropic) - Values trust signals, verified info, ethical presentation
+        # Weights: Trust 35%, Semantic 30%, Authority 20%, Location 15%
+        claude_score = int(
+            trust * 0.35 + 
+            semantic * 0.30 + 
+            authority * 0.20 + 
+            location * 0.15 +
+            (10 if p.license_status == 'Active' else 0) +  # Verified license bonus
+            (rating_factor * 5)
+        )
+        
+        # Gemini (Google) - Values Google ecosystem, local SEO, structured data
+        # Weights: Location 35%, Authority 30%, Semantic 20%, Trust 15%
+        gemini_score = int(
+            location * 0.35 + 
+            authority * 0.30 + 
+            semantic * 0.20 + 
+            trust * 0.15 +
+            (review_factor * 8) +   # Google loves reviews
+            (has_website * 5)
+        )
+        
+        # Ensure scores are within bounds
+        return {
+            'chatgpt': min(max(chatgpt_score, 0), 100),
+            'perplexity': min(max(perplexity_score, 0), 100),
+            'claude': min(max(claude_score, 0), 100),
+            'gemini': min(max(gemini_score, 0), 100)
+        }
+    
+    def _get_llm_insights(self, profile: AgentProfile, base_analysis: Dict, leaderboard: Optional[Dict]) -> Optional[Dict]:
+        """Get enhanced insights from LLM (recommendations, not scores)"""
+        profile_dict = {k: v for k, v in asdict(profile).items() if v not in (None, "", 0, {})}
+        scores = base_analysis.get('scores', {})
+        
+        prompt = f"""You are a real estate AI visibility consultant. Based on this agent's data and SALT scores, provide actionable insights.
 
-        prompt = f"""You are a real estate analyst. Analyze this agent and provide DETAILED insights.
+AGENT: {profile.full_name}
+LOCATION: {profile.city}, {profile.state}
+BROKERAGE: {profile.brokerage_name}
+EXPERIENCE: {profile.years_experience} years
+REVIEWS: {profile.total_reviews} reviews, {profile.average_rating}/5 rating
+SPECIALIZATION: {profile.specialization}
 
-AGENT DATA:
-{json.dumps(profile_dict, indent=2, default=str)}
-{lb_info}
+SALT SCORES (already calculated):
+- Semantic (Identity Clarity): {scores.get('semantic', {}).get('score', 0)}/100
+- Authority (Cite-worthiness): {scores.get('authority', {}).get('score', 0)}/100  
+- Location (Market Grounding): {scores.get('location', {}).get('score', 0)}/100
+- Trust (Safety to Recommend): {scores.get('trust', {}).get('score', 0)}/100
+- Overall: {scores.get('overall', {}).get('score', 0)}/100
 
-Return JSON with this structure (sample format):
-{{"scores": {{"authority": {{"score": 85, "grade": "A", "factors": [], "summary": "text"}}, "sentiment": {{"score": 75}}, "trustworthiness": {{"score": 90}}, "location_visibility": {{"score": 80}}, "overall": {{"score": 83, "grade": "A", "tier": "Strong"}}}}, "leaderboard": {{"national_percentile": "Top 10%", "state_rank": "#5", "city_rank": "#2", "comparative_analysis": "text"}}, "profile_analysis": {{"strengths": [], "areas_for_improvement": [], "unique_selling_points": [], "market_position": "text", "ideal_client_match": "text"}}, "competitive_insights": {{"market_tier": "Luxury", "experience_level": "Veteran", "digital_presence": "Excellent", "reputation_strength": "Exceptional"}}, "key_links": {{}}, "actionable_insights": {{"for_buyers": [], "for_sellers": [], "red_flags": [], "questions_to_ask": [], "geo_weaknesses": []}}, "competitor_gaps": {{"missing_signals": [], "content_gaps": [], "visibility_blockers": []}}, "geo_improvement_roadmap": {{"critical_issues": [], "high_priority": [], "medium_priority": [], "quick_wins": [], "estimated_impact": "text"}}, "recommendations": {{"for_buyers_sellers": "text", "for_agent": []}}, "executive_summary": "text"}}
+Return JSON with ONLY these fields (do not include scores):
+{{
+    "recommendations": {{
+        "for_agent": ["5 specific, actionable recommendations to improve AI visibility"]
+    }},
+    "profile_analysis": {{
+        "strengths": ["3-4 key strengths"],
+        "areas_for_improvement": ["3-4 areas to improve"],
+        "unique_selling_points": ["2-3 USPs"]
+    }},
+    "competitive_insights": {{
+        "market_position": "Brief market position summary",
+        "differentiation_strategy": "How to stand out"
+    }}
+}}
 
-IMPORTANT INSTRUCTIONS:
-1. Populate ALL fields with real data from the agent profile
-2. For "for_agent" recommendations: provide 5 detailed, actionable GEO improvement suggestions with specifics about what to do and why
-3. Executive summary must include: agent name, tier, ranking numbers, experience, ratings, digital presence assessment
-4. Return ONLY valid JSON, no markdown formatting or code fences
-
-Return ONLY valid JSON."""
+Return ONLY valid JSON, no markdown."""
 
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
+            if self.active_llm == 'openai' and self.openai_client:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+                text = response.choices[0].message.content.strip()
+            elif self.active_llm == 'gemini' and self.gemini_model:
+                response = self.gemini_model.generate_content(prompt)
+                text = response.text.strip()
+            else:
+                return None
+            
+            # Clean response
             if text.startswith('```json'): text = text[7:]
             if text.startswith('```'): text = text[3:]
             if text.endswith('```'): text = text[:-3]
-            parsed = json.loads(text.strip())
-            return parsed
-        except json.JSONDecodeError as je:
-            return self._fallback(profile, leaderboard)
+            
+            return json.loads(text.strip())
         except Exception as e:
-            import traceback
-            traceback.print_exc()     
-            return self._fallback(profile, leaderboard)
+            print(f"⚠️ LLM insights error: {e}")
+            return None
     
-    def _fallback(self, p: AgentProfile, lb: Dict = None) -> Dict:
-        # Calculate scores
-        auth = 0
-        auth_f = []
-        if p.website: auth += 15; auth_f.append(f"Website: {p.website}")
-        if p.profile_url: auth += 10; auth_f.append("Profile page available")
+    def _calculate_salt_scores(self, p: AgentProfile, lb: Optional[Dict] = None) -> Dict:
+        """
+        Calculate S.A.L.T. scores based on the framework:
+        S - Semantic: Identity clarity - Can AI identify who you are?
+        A - Authority: Cite-worthiness - Does AI have access to credible content?
+        L - Location: Market grounding - What markets do you work in?
+        T - Trust: Safety to recommend - Is the agent reputable and low-risk?
+        """
+        
+        # ============== SEMANTIC SCORE (Identity Clarity) ==============
+        # Measures: Name consistency, role clarity, brokerage attribution, bio quality
+        semantic = 0
+        semantic_f = []
+        semantic_breakdown = {
+            'identity_consistency': {'score': 0, 'max': 30, 'factors': []},
+            'role_clarity': {'score': 0, 'max': 25, 'factors': []},
+            'cross_platform': {'score': 0, 'max': 25, 'factors': []},
+            'value_proposition': {'score': 0, 'max': 20, 'factors': []}
+        }
+        
+        # 2.1 Identity Consistency (30 pts max)
+        if p.full_name and len(p.full_name.split()) >= 2:
+            semantic_breakdown['identity_consistency']['score'] += 10
+            semantic_breakdown['identity_consistency']['factors'].append("Full name present")
+        if p.phone_number:
+            semantic_breakdown['identity_consistency']['score'] += 5
+            semantic_breakdown['identity_consistency']['factors'].append("Phone number available")
+        if p.office_address:
+            semantic_breakdown['identity_consistency']['score'] += 5
+            semantic_breakdown['identity_consistency']['factors'].append("Office address listed")
+        if p.bio_text and len(p.bio_text) > 100:
+            semantic_breakdown['identity_consistency']['score'] += 10
+            semantic_breakdown['identity_consistency']['factors'].append("Detailed bio present")
+        elif p.bio_text:
+            semantic_breakdown['identity_consistency']['score'] += 5
+            semantic_breakdown['identity_consistency']['factors'].append("Basic bio present")
+        
+        # 2.2 Role & Positioning Clarity (25 pts max)
+        if p.brokerage_name:
+            semantic_breakdown['role_clarity']['score'] += 10
+            semantic_breakdown['role_clarity']['factors'].append(f"Brokerage: {p.brokerage_name}")
+        if p.license_status == 'Active':
+            semantic_breakdown['role_clarity']['score'] += 8
+            semantic_breakdown['role_clarity']['factors'].append("Active license verified")
+        if p.specialization:
+            semantic_breakdown['role_clarity']['score'] += 7
+            semantic_breakdown['role_clarity']['factors'].append(f"Specialization: {p.specialization}")
+        
+        # 2.3 Cross-Platform Consistency (25 pts max)
         platforms = sum([1 for x in [p.instagram_url, p.facebook_url, p.twitter_url, p.linkedin_url] if x])
-        auth += min(platforms * 6, 24)
-        if platforms: auth_f.append(f"Active on {platforms} social platforms")
-        if p.total_reviews >= 100: auth += 20; auth_f.append(f"Strong reviews: {p.total_reviews}")
-        elif p.total_reviews >= 50: auth += 15; auth_f.append(f"Good reviews: {p.total_reviews}")
-        if p.average_rating >= 4.8: auth += 15; auth_f.append(f"Excellent rating: {p.average_rating}/5")
-        elif p.average_rating >= 4.5: auth += 12; auth_f.append(f"Very good rating: {p.average_rating}/5")
-        if p.industry_ranking: auth += 15; auth_f.append(f"Ranking: {p.industry_ranking}")
+        platform_score = min(platforms * 6, 20)
+        semantic_breakdown['cross_platform']['score'] += platform_score
+        if platforms >= 3:
+            semantic_breakdown['cross_platform']['factors'].append(f"Strong presence on {platforms} platforms")
+        elif platforms >= 1:
+            semantic_breakdown['cross_platform']['factors'].append(f"Present on {platforms} platform(s) - expand recommended")
+        else:
+            semantic_breakdown['cross_platform']['factors'].append("No social presence detected - critical gap")
+        if p.profile_url:
+            semantic_breakdown['cross_platform']['score'] += 5
+            semantic_breakdown['cross_platform']['factors'].append("Profile URL available")
         
-        sent = 50 + ((p.average_rating - 3) * 20 if p.average_rating else 0)
-        sent_f = [f"Rating: {p.average_rating}/5 on {p.review_platform}" if p.average_rating else "No rating data"]
-        if p.credibility_tier == 'Elite': sent += 15; sent_f.append("Elite credibility tier")
+        # 2.4 Value Proposition (20 pts max)
+        if p.years_experience >= 20:
+            semantic_breakdown['value_proposition']['score'] += 10
+            semantic_breakdown['value_proposition']['factors'].append(f"Veteran: {p.years_experience}+ years")
+        elif p.years_experience >= 10:
+            semantic_breakdown['value_proposition']['score'] += 7
+            semantic_breakdown['value_proposition']['factors'].append(f"Experienced: {p.years_experience} years")
+        elif p.years_experience >= 5:
+            semantic_breakdown['value_proposition']['score'] += 4
+            semantic_breakdown['value_proposition']['factors'].append(f"Established: {p.years_experience} years")
+        if p.career_sales:
+            semantic_breakdown['value_proposition']['score'] += 5
+            semantic_breakdown['value_proposition']['factors'].append(f"Career sales: {p.career_sales}")
+        if p.industry_ranking:
+            semantic_breakdown['value_proposition']['score'] += 5
+            semantic_breakdown['value_proposition']['factors'].append(f"Industry ranking: {p.industry_ranking}")
         
-        trust = 25 if p.license_status == 'Active' else 0
-        trust_f = [f"Active {p.jurisdiction} license" if p.license_status == 'Active' else "License status unknown"]
-        if p.brokerage_name: trust += 15; trust_f.append(f"Brokerage: {p.brokerage_name}")
-        trust += 15; trust_f.append("Verified identity")
-        if p.verified_realtrends == 'Yes': trust += 10; trust_f.append("RealTrends verified")
+        semantic = sum(s['score'] for s in semantic_breakdown.values())
+        for section in semantic_breakdown.values():
+            semantic_f.extend(section['factors'])
         
-        loc = 0
-        loc_f = []
-        if p.city: loc += 25; loc_f.append(f"Market: {p.city}")
-        if p.state: loc += 20; loc_f.append(f"State: {p.state}")
-        if p.zip_code: loc += 15; loc_f.append(f"ZIP: {p.zip_code}")
-        if p.office_address: loc += 15; loc_f.append("Office location verified")
+        # ============== AUTHORITY SCORE (Cite-worthiness) ==============
+        # Measures: Owned domain, content quality, review volume, media presence
+        authority = 0
+        authority_f = []
+        authority_breakdown = {
+            'owned_properties': {'score': 0, 'max': 35, 'factors': []},
+            'social_authority': {'score': 0, 'max': 25, 'factors': []},
+            'review_authority': {'score': 0, 'max': 25, 'factors': []},
+            'media_presence': {'score': 0, 'max': 15, 'factors': []}
+        }
         
-        auth, sent, trust, loc = min(auth,100), min(max(int(sent),0),100), min(trust,100), min(loc,100)
-        overall = int(auth*0.3 + sent*0.25 + trust*0.25 + loc*0.2)
+        # 3.1 Owned Domain Authority (35 pts max)
+        if p.website:
+            authority_breakdown['owned_properties']['score'] += 25
+            authority_breakdown['owned_properties']['factors'].append(f"Owned website: {p.website}")
+        else:
+            authority_breakdown['owned_properties']['factors'].append("No owned website - AI cites platforms instead")
+        if p.profile_url:
+            authority_breakdown['owned_properties']['score'] += 10
+            authority_breakdown['owned_properties']['factors'].append("Profile page available")
+        
+        # 3.2 Social Media Authority (25 pts max)
+        if p.linkedin_url:
+            authority_breakdown['social_authority']['score'] += 8
+            authority_breakdown['social_authority']['factors'].append("LinkedIn presence")
+        if p.instagram_url:
+            authority_breakdown['social_authority']['score'] += 6
+            authority_breakdown['social_authority']['factors'].append("Instagram presence")
+        if p.facebook_url:
+            authority_breakdown['social_authority']['score'] += 6
+            authority_breakdown['social_authority']['factors'].append("Facebook presence")
+        if p.twitter_url:
+            authority_breakdown['social_authority']['score'] += 5
+            authority_breakdown['social_authority']['factors'].append("Twitter/X presence")
+        
+        # 3.3 Review Authority (25 pts max)
+        if p.total_reviews >= 100:
+            authority_breakdown['review_authority']['score'] += 25
+            authority_breakdown['review_authority']['factors'].append(f"Strong review base: {p.total_reviews} reviews")
+        elif p.total_reviews >= 50:
+            authority_breakdown['review_authority']['score'] += 18
+            authority_breakdown['review_authority']['factors'].append(f"Good review base: {p.total_reviews} reviews")
+        elif p.total_reviews >= 20:
+            authority_breakdown['review_authority']['score'] += 12
+            authority_breakdown['review_authority']['factors'].append(f"Developing reviews: {p.total_reviews}")
+        elif p.total_reviews > 0:
+            authority_breakdown['review_authority']['score'] += 5
+            authority_breakdown['review_authority']['factors'].append(f"Limited reviews: {p.total_reviews}")
+        else:
+            authority_breakdown['review_authority']['factors'].append("No reviews - critical authority gap")
+        
+        # 3.4 Media/Industry Presence (15 pts max)
+        if p.industry_ranking:
+            authority_breakdown['media_presence']['score'] += 8
+            authority_breakdown['media_presence']['factors'].append(f"Industry recognized: {p.industry_ranking}")
+        if p.verified_realtrends == 'Yes':
+            authority_breakdown['media_presence']['score'] += 4
+            authority_breakdown['media_presence']['factors'].append("RealTrends verified")
+        if p.media_mentions_count > 0:
+            authority_breakdown['media_presence']['score'] += 3
+            authority_breakdown['media_presence']['factors'].append(f"Media mentions: {p.media_mentions_count}")
+        
+        authority = sum(s['score'] for s in authority_breakdown.values())
+        for section in authority_breakdown.values():
+            authority_f.extend(section['factors'])
+        
+        # ============== LOCATION SCORE (Market Grounding) ==============
+        # Measures: Geographic signals, neighborhood content, local keywords
+        location = 0
+        location_f = []
+        location_breakdown = {
+            'geographic_signals': {'score': 0, 'max': 40, 'factors': []},
+            'neighborhood_authority': {'score': 0, 'max': 30, 'factors': []},
+            'local_content': {'score': 0, 'max': 30, 'factors': []}
+        }
+        
+        # 4.1 Geographic Signals (40 pts max)
+        if p.city:
+            location_breakdown['geographic_signals']['score'] += 15
+            location_breakdown['geographic_signals']['factors'].append(f"City identified: {p.city}")
+        if p.state:
+            location_breakdown['geographic_signals']['score'] += 10
+            location_breakdown['geographic_signals']['factors'].append(f"State: {p.state}")
+        if p.zip_code:
+            location_breakdown['geographic_signals']['score'] += 8
+            location_breakdown['geographic_signals']['factors'].append(f"ZIP code: {p.zip_code}")
+        if p.office_address:
+            location_breakdown['geographic_signals']['score'] += 7
+            location_breakdown['geographic_signals']['factors'].append("Office address verified")
+        
+        # 4.2 Neighborhood Authority (30 pts max) - Based on available data
+        # Without neighborhood pages, this will be low
+        if p.city and p.specialization:
+            location_breakdown['neighborhood_authority']['score'] += 10
+            location_breakdown['neighborhood_authority']['factors'].append(f"Market specialization in {p.city}")
+        if p.total_reviews >= 20 and p.city:
+            location_breakdown['neighborhood_authority']['score'] += 8
+            location_breakdown['neighborhood_authority']['factors'].append("Review-based local credibility")
+        else:
+            location_breakdown['neighborhood_authority']['factors'].append("Missing neighborhood-specific content")
+        
+        # 4.3 Local Content Signals (30 pts max)
+        # Website with local content would score higher
+        if p.website and p.city:
+            location_breakdown['local_content']['score'] += 12
+            location_breakdown['local_content']['factors'].append("Website can host local content")
+        if p.bio_text and p.city and p.city.lower() in str(p.bio_text).lower():
+            location_breakdown['local_content']['score'] += 8
+            location_breakdown['local_content']['factors'].append("Bio mentions local market")
+        if p.sample_listing_url:
+            location_breakdown['local_content']['score'] += 5
+            location_breakdown['local_content']['factors'].append("Active listings available")
+        if not location_breakdown['local_content']['factors']:
+            location_breakdown['local_content']['factors'].append("No local content detected - AI defaults to portals")
+        
+        location = sum(s['score'] for s in location_breakdown.values())
+        for section in location_breakdown.values():
+            location_f.extend(section['factors'])
+        
+        # ============== TRUST SCORE (Safety to Recommend) ==============
+        # Measures: Sentiment, reputation signals, license status, outcome proof
+        trust = 0
+        trust_f = []
+        trust_breakdown = {
+            'sentiment_profile': {'score': 0, 'max': 35, 'factors': []},
+            'license_verification': {'score': 0, 'max': 25, 'factors': []},
+            'reputation_signals': {'score': 0, 'max': 25, 'factors': []},
+            'outcome_proof': {'score': 0, 'max': 15, 'factors': []}
+        }
+        
+        # 5.1 Sentiment Profile (35 pts max)
+        if p.average_rating >= 4.8:
+            trust_breakdown['sentiment_profile']['score'] += 35
+            trust_breakdown['sentiment_profile']['factors'].append(f"Exceptional rating: {p.average_rating}/5")
+        elif p.average_rating >= 4.5:
+            trust_breakdown['sentiment_profile']['score'] += 28
+            trust_breakdown['sentiment_profile']['factors'].append(f"Excellent rating: {p.average_rating}/5")
+        elif p.average_rating >= 4.0:
+            trust_breakdown['sentiment_profile']['score'] += 20
+            trust_breakdown['sentiment_profile']['factors'].append(f"Good rating: {p.average_rating}/5")
+        elif p.average_rating >= 3.5:
+            trust_breakdown['sentiment_profile']['score'] += 10
+            trust_breakdown['sentiment_profile']['factors'].append(f"Average rating: {p.average_rating}/5")
+        elif p.average_rating > 0:
+            trust_breakdown['sentiment_profile']['score'] += 5
+            trust_breakdown['sentiment_profile']['factors'].append(f"Below average rating: {p.average_rating}/5")
+        else:
+            trust_breakdown['sentiment_profile']['factors'].append("No rating data available")
+        
+        # 5.2 License Verification (25 pts max)
+        if p.license_status == 'Active':
+            trust_breakdown['license_verification']['score'] += 20
+            trust_breakdown['license_verification']['factors'].append(f"Active license in {p.jurisdiction}")
+        if p.license_number:
+            trust_breakdown['license_verification']['score'] += 5
+            trust_breakdown['license_verification']['factors'].append("License number verified")
+        if not p.license_status:
+            trust_breakdown['license_verification']['factors'].append("License status unknown")
+        
+        # 5.3 Reputation Signals (25 pts max)
+        if p.brokerage_name:
+            trust_breakdown['reputation_signals']['score'] += 10
+            trust_breakdown['reputation_signals']['factors'].append(f"Affiliated with {p.brokerage_name}")
+        if p.credibility_tier == 'Elite':
+            trust_breakdown['reputation_signals']['score'] += 10
+            trust_breakdown['reputation_signals']['factors'].append("Elite credibility tier")
+        elif p.credibility_tier:
+            trust_breakdown['reputation_signals']['score'] += 5
+            trust_breakdown['reputation_signals']['factors'].append(f"Credibility tier: {p.credibility_tier}")
+        if p.total_reviews >= 50:
+            trust_breakdown['reputation_signals']['score'] += 5
+            trust_breakdown['reputation_signals']['factors'].append("Substantial review history")
+        
+        # 5.4 Outcome Proof (15 pts max)
+        if p.career_sales:
+            trust_breakdown['outcome_proof']['score'] += 8
+            trust_breakdown['outcome_proof']['factors'].append(f"Documented sales: {p.career_sales}")
+        if p.years_experience >= 10:
+            trust_breakdown['outcome_proof']['score'] += 4
+            trust_breakdown['outcome_proof']['factors'].append("Long track record")
+        if p.industry_ranking:
+            trust_breakdown['outcome_proof']['score'] += 3
+            trust_breakdown['outcome_proof']['factors'].append("Industry recognition as proof")
+        if not trust_breakdown['outcome_proof']['factors']:
+            trust_breakdown['outcome_proof']['factors'].append("Limited outcome documentation")
+        
+        trust = sum(s['score'] for s in trust_breakdown.values())
+        for section in trust_breakdown.values():
+            trust_f.extend(section['factors'])
+        
+        # ============== OVERALL SCORE ==============
+        # S.A.L.T. weighted equally as each layer can collapse visibility
+        semantic = min(semantic, 100)
+        authority = min(authority, 100)
+        location = min(location, 100)
+        trust = min(trust, 100)
+        overall = int((semantic + authority + location + trust) / 4)
         
         def grade(s): return "A+" if s>=97 else "A" if s>=93 else "A-" if s>=90 else "B+" if s>=87 else "B" if s>=83 else "B-" if s>=80 else "C+" if s>=77 else "C" if s>=73 else "C-" if s>=70 else "D" if s>=60 else "F"
         def tier(s): return "Elite" if s>=95 else "Exceptional" if s>=85 else "Strong" if s>=75 else "Solid" if s>=65 else "Developing"
@@ -155,24 +553,48 @@ Return ONLY valid JSON."""
         city_rank = lb.get('city_rank','N/A') if lb else 'N/A'
         pct = lb.get('percentile','N/A') if lb else 'N/A'
         
-        platforms = sum([1 for x in [p.instagram_url, p.facebook_url, p.twitter_url, p.linkedin_url] if x])
-        
         exec_sum = f"{p.full_name} is a {tier(overall).lower()}-tier real estate professional ranked #{state_rank} in {p.state} and #{city_rank} in {p.city}, placing them in the top {pct}% nationally. With {p.years_experience} years of experience and {p.career_sales or 'significant'} in career sales, they demonstrate {'exceptional' if overall>=85 else 'strong' if overall>=70 else 'developing'} market expertise. Client satisfaction is {'excellent' if p.average_rating>=4.8 else 'strong' if p.average_rating>=4.5 else 'good'} with a {p.average_rating}/5.0 rating across {p.total_reviews} reviews on {p.review_platform or 'review platforms'}. "
         if p.industry_ranking: exec_sum += f"Notable achievement: {p.industry_ranking}. "
         exec_sum += f"Specializing in {p.specialization or 'residential'} properties, they operate from {p.city}, {p.state}. "
         if links: exec_sum += f"Connect via: {', '.join([f'{k}: {v}' for k,v in list(links.items())[:2]])}. "
         exec_sum += f"{'Highly recommended' if overall>=85 else 'Recommended' if overall>=70 else 'Consider'} for buyers and sellers in the {p.city} market."
         
+        platforms = sum([1 for x in [p.instagram_url, p.facebook_url, p.twitter_url, p.linkedin_url] if x])
+        
         return {
             "scores": {
-                "authority": {"score": auth, "grade": grade(auth), "factors": auth_f, "summary": f"Authority score of {auth}/100 based on digital presence and {p.total_reviews} reviews."},
-                "sentiment": {"score": sent, "grade": grade(sent), "factors": sent_f, "summary": f"Sentiment score of {sent}/100 reflecting {p.average_rating}/5 rating."},
-                "trustworthiness": {"score": trust, "grade": grade(trust), "factors": trust_f, "summary": f"Trust score of {trust}/100 with active licensing and brokerage affiliation."},
-                "location_visibility": {"score": loc, "grade": grade(loc), "factors": loc_f, "summary": f"Location visibility of {loc}/100 in {p.city}, {p.state}."},
+                "semantic": {
+                    "score": semantic, 
+                    "grade": grade(semantic), 
+                    "factors": semantic_f, 
+                    "summary": f"Semantic clarity score of {semantic}/100 measuring identity consistency and role clarity.",
+                    "breakdown": semantic_breakdown
+                },
+                "authority": {
+                    "score": authority, 
+                    "grade": grade(authority), 
+                    "factors": authority_f, 
+                    "summary": f"Authority score of {authority}/100 based on owned content, reviews ({p.total_reviews}), and cite-worthiness.",
+                    "breakdown": authority_breakdown
+                },
+                "location": {
+                    "score": location, 
+                    "grade": grade(location), 
+                    "factors": location_f, 
+                    "summary": f"Location visibility of {location}/100 for market grounding in {p.city}, {p.state}.",
+                    "breakdown": location_breakdown
+                },
+                "trust": {
+                    "score": trust, 
+                    "grade": grade(trust), 
+                    "factors": trust_f, 
+                    "summary": f"Trust score of {trust}/100 based on sentiment ({p.average_rating}/5), licensing, and reputation signals.",
+                    "breakdown": trust_breakdown
+                },
                 "overall": {"score": overall, "grade": grade(overall), "tier": tier(overall)}
             },
             "leaderboard": {"national_percentile": f"Top {pct}%", "state_rank": f"#{state_rank}", "city_rank": f"#{city_rank}", "comparative_analysis": f"Ranked #{state_rank} among {lb.get('state_total','N/A') if lb else 'N/A'} agents in {p.state}."},
-            "profile_analysis": {"strengths": auth_f[:4], "areas_for_improvement": ["Expand digital presence"] if platforms<3 else ["Continue building reviews"], "unique_selling_points": [p.specialization or "Local expertise", p.industry_ranking or f"{p.years_experience} years experience"], "market_position": f"{p.specialization or 'Residential'} specialist in {p.city}", "ideal_client_match": f"Clients seeking {p.specialization or 'residential'} properties in {p.city}"},
+            "profile_analysis": {"strengths": authority_f[:4], "areas_for_improvement": ["Expand digital presence"] if platforms<3 else ["Continue building reviews"], "unique_selling_points": [p.specialization or "Local expertise", p.industry_ranking or f"{p.years_experience} years experience"], "market_position": f"{p.specialization or 'Residential'} specialist in {p.city}", "ideal_client_match": f"Clients seeking {p.specialization or 'residential'} properties in {p.city}"},
             "competitive_insights": {"market_tier": "Luxury" if p.specialization=="Luxury" else "Mid-Market", "experience_level": "Veteran" if p.years_experience>=20 else "Established" if p.years_experience>=10 else "Growing", "digital_presence": "Excellent" if platforms>=4 else "Good" if platforms>=2 else "Needs Work", "reputation_strength": "Exceptional" if p.total_reviews>=100 else "Strong" if p.total_reviews>=50 else "Building"},
             "key_links": links,
             "actionable_insights": {
@@ -255,17 +677,81 @@ Return ONLY valid JSON."""
 
 class AgentDatabase:
     def __init__(self, excel_path: str):
+        print(f"📂 Loading Excel database from: {excel_path}")
         self.df = pd.read_excel(excel_path)
+        print(f"✅ Loaded {len(self.df)} records")
         self.df['name_lower'] = self.df['Full_Name'].str.lower().str.strip()
+        print(f"⚙️  Computing rankings...")
         self._compute_rankings()
-    
+        print(f"🔍 Building search cache...")
+        self._build_search_cache()
+        print(f"✅ Database ready with {len(self.search_index)} search keys")
+
+    def _build_search_cache(self):
+        """Build comprehensive search index for fast lookup with partial matching"""
+        from collections import defaultdict
+        self.search_index = defaultdict(list)
+
+        for idx, row in self.df.iterrows():
+            name_lower = str(row.get('name_lower', '')).lower().strip()
+            if not name_lower or name_lower == 'nan':
+                continue
+
+            # Get brokerage name safely
+            brokerage = str(row.get('Brokerage_Name', ''))
+            if brokerage == 'nan' or not brokerage:
+                brokerage = ''
+
+            agent_data = {
+                'id': str(row.get('Agent_ID', '')),
+                'name': str(row.get('Full_Name', '')),
+                'city': str(row.get('City', '')),
+                'state': str(row.get('State', '')),
+                'brokerage': brokerage
+            }
+
+            # Skip if name is empty
+            if not agent_data['name'] or agent_data['name'] == 'nan':
+                continue
+
+            # Index by full name
+            self.search_index[name_lower].append(agent_data)
+
+            # Index ALL prefixes for partial matching
+            # This allows "jade m" to find "jade mills"
+            parts = name_lower.split()
+            for i in range(len(parts)):
+                # Index individual words
+                word = parts[i]
+                if len(word) >= 2:  # Skip single letters
+                    self.search_index[word].append(agent_data)
+
+                # Index word prefixes (ja, jad, jade)
+                for prefix_len in range(2, len(word) + 1):
+                    self.search_index[word[:prefix_len]].append(agent_data)
+
+                # Index multi-word combinations with partial last word
+                # "jade m", "jade mi", "jade mil", "jade mill", "jade mills"
+                for j in range(i+1, len(parts)+1):
+                    last_word = parts[j-1]
+                    # Full combination
+                    full_combo = ' '.join(parts[i:j])
+                    if full_combo != name_lower:
+                        self.search_index[full_combo].append(agent_data)
+
+                    # Partial last word (jade m, jade mi, etc.)
+                    if j == i + 2:  # Only for two-word combinations
+                        for prefix_len in range(1, len(last_word)):
+                            partial = f"{parts[i]} {last_word[:prefix_len]}"
+                            self.search_index[partial].append(agent_data)
+
     def _compute_rankings(self):
         # Ensure numeric columns exist and handle NaN values
         for col in ['Average_Rating', 'Total_Reviews', 'Years_Experience', 'Credibility_Score']:
             if col not in self.df.columns:
                 self.df[col] = 0
             self.df[col] = pd.to_numeric(self.df[col], errors='coerce').fillna(0)
-        
+
         self.df['rating_rank'] = self.df['Average_Rating'].rank(ascending=False, method='min', na_option='bottom')
         self.df['review_rank'] = self.df['Total_Reviews'].rank(ascending=False, method='min', na_option='bottom')
         self.df['experience_rank'] = self.df['Years_Experience'].rank(ascending=False, method='min', na_option='bottom')
@@ -343,12 +829,49 @@ class AgentDatabase:
             return {}
     
     def search(self, query: str) -> List[Dict]:
+        """Fast search using cached index"""
         q = query.lower().strip()
-        exact = self.df[self.df['name_lower'] == q]
-        if not exact.empty: return exact.to_dict('records')
-        contains = self.df[self.df['name_lower'].str.contains(q, na=False)]
-        if not contains.empty: return contains.to_dict('records')
-        return []
+        if not q:
+            return []
+
+        # Check cache first for name matches
+        if q in self.search_index:
+            results = self.search_index[q]
+            # Remove duplicates by agent ID
+            seen = set()
+            unique_results = []
+            for r in results:
+                if r['id'] not in seen:
+                    seen.add(r['id'])
+                    unique_results.append(r)
+            return unique_results[:10]
+
+        # Fallback to partial matching on city/state
+        matches = []
+        try:
+            city_state = self.df[
+                (self.df['City'].str.lower().str.contains(q, na=False, regex=False)) |
+                (self.df['State'].str.lower().str.contains(q, na=False, regex=False))
+            ].head(10)
+
+            if not city_state.empty:
+                for _, row in city_state.iterrows():
+                    name = str(row.get('Full_Name', ''))
+                    brokerage = str(row.get('Brokerage_Name', ''))
+                    if brokerage == 'nan':
+                        brokerage = ''
+                    if name and name != 'nan':
+                        matches.append({
+                            'id': str(row.get('Agent_ID', '')),
+                            'name': name,
+                            'city': str(row.get('City', '')),
+                            'state': str(row.get('State', '')),
+                            'brokerage': brokerage
+                        })
+        except Exception as e:
+            print(f"Error in city/state search: {e}")
+
+        return matches
     
     def get_all_agents_for_map(self) -> List[Dict]:
         """Returns ALL agents for map - no limit"""
@@ -446,37 +969,33 @@ class AgentDatabase:
 
 
 class AgentIntelligenceSystem:
-    def __init__(self, excel_path: str, gemini_api_key: str = None):
+    def __init__(self, excel_path: str, gemini_api_key: Optional[str] = None, openai_api_key: Optional[str] = None):
         self.db = AgentDatabase(excel_path)
-        self.analyzer = GeminiAnalyzer(gemini_api_key) if gemini_api_key else None
+        # Initialize unified AI analyzer with both keys
+        self.analyzer = AIAnalyzer(
+            openai_api_key=openai_api_key or os.environ.get('OPENAI_API_KEY'),
+            gemini_api_key=gemini_api_key or os.environ.get('GEMINI_API_KEY')
+        )
+        print(f"🤖 Active LLM: {self.analyzer.active_llm or 'None (algorithmic only)'}")
     
     def analyze_agent(self, name: str, enrich_web: bool = False) -> Dict:
         results = self.db.search(name)
         if not results: return {"error": f"No agent found matching '{name}'"}
-        
-        record = results[0]
-        profile = self.db.record_to_profile(record)
+
+        # Search returns simplified dict, need to get full record from DataFrame
+        agent_id = results[0]['id']
+        full_record = self.db.df[self.db.df['Agent_ID'] == agent_id].iloc[0].to_dict()
+        profile = self.db.record_to_profile(full_record)
         leaderboard = self.db.get_leaderboard_context(profile.agent_id)
         
         # Debug logging
         print(f"📊 Agent: {profile.full_name} (ID: {profile.agent_id})")
         print(f"📍 Location: {profile.city}, {profile.state}")
         if leaderboard:
-            print(f"🏆 Leaderboard: State #{leaderboard.get('state_rank')}/{leaderboard.get('state_total')}, City #{leaderboard.get('city_rank')}/{leaderboard.get('city_total')}")
-        else:
-            print(f"⚠️ Leaderboard context is empty!")
+            print(f"🏆 Leaderboard: State #{leaderboard.get('state_rank')}/{leaderboard.get('state_total')}")
         
-        if self.analyzer:
-            print(f"\n🔑 GEMINI API KEY FOUND - Using LLM analysis")
-            analysis = self.analyzer.analyze_agent(profile, leaderboard)
-        else:
-            print(f"\n{'='*60}")
-            print(f"⚠️  NO GEMINI API KEY - Using FALLBACK (no LLM)")
-            print(f"📊 Generating algorithmic analysis for: {profile.full_name}")
-            print(f"{'='*60}\n")
-            temp = GeminiAnalyzer.__new__(GeminiAnalyzer)
-            analysis = temp._fallback(profile, leaderboard)
-            print(f"✅ FALLBACK ANALYSIS COMPLETE (no AI used)\n")
+        # Use unified analyzer (always calculates SALT algorithmically, enhances with LLM if available)
+        analysis = self.analyzer.analyze_agent(profile, leaderboard)
         
         return {
             "agent": {
@@ -499,27 +1018,35 @@ class AgentIntelligenceSystem:
             },
             "analysis": analysis,
             "leaderboard_context": leaderboard,
-            "metadata": {"data_source": "RAG + Gemini Analysis", "database_updated": profile.observation_timestamp,
-                        "analysis_timestamp": datetime.now().isoformat(), "total_agents": leaderboard.get('total_agents',0)}
+            "metadata": {
+                "data_source": f"SALT Algorithm + {self.analyzer.active_llm or 'No LLM'}", 
+                "database_updated": profile.observation_timestamp,
+                "analysis_timestamp": datetime.now().isoformat(), 
+                "total_agents": leaderboard.get('total_agents', 0) if leaderboard else 0,
+                "active_llm": self.analyzer.active_llm
+            }
         }
     
-    def get_map_data(self, limit: int = None) -> List[Dict]:
+    def get_map_data(self, limit: Optional[int] = None) -> List[Dict]:
         """Get ALL agents for map - no limit by default"""
         agents = self.db.get_all_agents_for_map()
         return agents[:limit] if limit else agents
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['analyze', 'map'])
     parser.add_argument('--name', '-n')
-    parser.add_argument('--api-key', '-k')
+    parser.add_argument('--gemini-key', '-g')
+    parser.add_argument('--openai-key', '-o')
     parser.add_argument('--db', '-d', default='US_Real_Estate_Agents_Database.xlsx')
     args = parser.parse_args()
     
-    api_key = args.api_key or os.environ.get('GEMINI_API_KEY')
-    system = AgentIntelligenceSystem(args.db, api_key)
+    system = AgentIntelligenceSystem(
+        args.db, 
+        gemini_api_key=args.gemini_key,
+        openai_api_key=args.openai_key
+    )
     
     if args.action == 'analyze' and args.name:
         print(json.dumps(system.analyze_agent(args.name), indent=2, default=str))
