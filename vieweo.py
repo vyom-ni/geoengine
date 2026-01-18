@@ -1363,16 +1363,34 @@ FRONTEND_HTML = '''
             const [data, setData] = useState(cachedData || null);
             const [loading, setLoading] = useState(!cachedData);
             const [showLoginModal, setShowLoginModal] = useState(false);
+            
+            // Use ref to track if we've already fetched for this agent
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
 
-            const fetchData = useCallback(() => {
-                // Skip fetch if we already have cached data
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
+
+            useEffect(() => {
+                // If we have cached data, use it immediately
                 if (cachedData) {
                     setData(cachedData);
                     setLoading(false);
+                    hasFetchedRef.current = true;
                     return;
                 }
                 
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
                 setLoading(true);
+                
                 fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
                     .then(r => r.json())
                     .then(d => {
@@ -1387,11 +1405,13 @@ FRONTEND_HTML = '''
                         setData({error: 'Failed to load data'});
                         setLoading(false);
                     });
-            }, [agentName, cachedData, onDataLoaded]);
+            }, [agentName, cachedData]); // Removed fetchData and onDataLoaded from deps
 
+            // Handle login state change separately
+            const prevLoggedIn = React.useRef(user?.logged_in);
             useEffect(() => {
-                // Only refetch if user login state changes and we need fresh SALT scores
-                if (cachedData && user?.logged_in !== cachedData?.user_status?.logged_in) {
+                if (prevLoggedIn.current !== user?.logged_in && data) {
+                    prevLoggedIn.current = user?.logged_in;
                     // User logged in/out - need to refresh for SALT scores
                     setLoading(true);
                     fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
@@ -1406,10 +1426,8 @@ FRONTEND_HTML = '''
                         .catch(() => {
                             setLoading(false);
                         });
-                } else {
-                    fetchData();
                 }
-            }, [fetchData, user?.logged_in]);
+            }, [user?.logged_in]);
 
             if (loading) return <LoadingScreen title="Analyzing Visibility" subtitle="Computing AI discoverability metrics"/>;
 
@@ -1820,15 +1838,32 @@ FRONTEND_HTML = '''
             const [data, setData] = useState(cachedData || null);
             const [loading, setLoading] = useState(!cachedData);
             const [error, setError] = useState(null);
+            
+            // Use ref to track if we've already fetched
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
+
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
 
             useEffect(() => {
                 // Use cached data if available
                 if (cachedData) {
                     setData(cachedData);
                     setLoading(false);
+                    hasFetchedRef.current = true;
                     return;
                 }
                 
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
                 setLoading(true);
                 setError(null);
                 fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
@@ -1852,7 +1887,7 @@ FRONTEND_HTML = '''
                         setError(e.message);
                         setLoading(false);
                     });
-            }, [agentName, cachedData, onDataLoaded]);
+            }, [agentName, cachedData]); // Removed onDataLoaded from deps to prevent infinite loop
 
             if (loading) return <LoadingScreen title="Generating Full Report" subtitle="Comprehensive AI visibility analysis"/>;
 
@@ -2202,15 +2237,32 @@ FRONTEND_HTML = '''
         const SALTDetailsPage = ({ agentName, user, onBack, onLogout, onAddAgent, cachedData, onDataLoaded }) => {
             const [data, setData] = useState(cachedData || null);
             const [loading, setLoading] = useState(!cachedData);
+            
+            // Use ref to track if we've already fetched
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
+
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
 
             useEffect(() => {
                 // Use cached data if available
                 if (cachedData) {
                     setData(cachedData);
                     setLoading(false);
+                    hasFetchedRef.current = true;
                     return;
                 }
                 
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
                 setLoading(true);
                 fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
                     .then(r => r.json())
@@ -2226,7 +2278,7 @@ FRONTEND_HTML = '''
                         setData({error: 'Failed to load data'});
                         setLoading(false);
                     });
-            }, [agentName, cachedData, onDataLoaded]);
+            }, [agentName, cachedData]); // Removed onDataLoaded from deps to prevent infinite loop
 
             if (loading) return <LoadingScreen title="Loading SALT Analysis" subtitle="Computing visibility metrics"/>;
 
