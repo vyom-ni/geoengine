@@ -8,7 +8,9 @@
       "Bash(pip install:*)",
       "Bash(timeout /t 3)",
       "Bash(findstr:*)",
-      "Bash(exit 0)"
+      "Bash(exit 0)",
+      "Bash(python3 -m pip list:*)",
+      "Bash(powershell -Command:*)"
     ]
   }
 }

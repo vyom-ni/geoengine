@@ -134,64 +134,46 @@ class AIAnalyzer:
         """
         Calculate visibility scores for different LLMs based on their known preferences.
         Each LLM has different weights for various factors.
+        Scores are normalized to 0-100 range with realistic distribution.
         """
         scores = analysis.get('scores', {})
         semantic = scores.get('semantic', {}).get('score', 0)
         authority = scores.get('authority', {}).get('score', 0)
         location = scores.get('location', {}).get('score', 0)
         trust = scores.get('trust', {}).get('score', 0)
-        
-        # Count digital presence factors
+
+        # Count digital presence factors (normalized to 0-1)
         platforms = sum([1 for x in [p.instagram_url, p.facebook_url, p.twitter_url, p.linkedin_url] if x])
-        has_website = 1 if p.website else 0
-        review_factor = min(p.total_reviews / 100, 1.0)  # Normalize to 0-1
-        rating_factor = (p.average_rating - 3) / 2 if p.average_rating >= 3 else 0  # 3-5 -> 0-1
-        
+        platform_factor = platforms / 4.0  # 0 to 1
+        has_website = 1.0 if p.website else 0.0
+        review_factor = min(p.total_reviews / 150, 1.0)  # Need 150+ reviews for max
+        rating_factor = max(0, (p.average_rating - 3.5) / 1.5) if p.average_rating >= 3.5 else 0  # 3.5-5 -> 0-1
+
         # ChatGPT (OpenAI) - Values structured data, reviews, clear identity
-        # Weights: Semantic 30%, Authority 25%, Trust 30%, Location 15%
-        chatgpt_score = int(
-            semantic * 0.30 + 
-            authority * 0.25 + 
-            trust * 0.30 + 
-            location * 0.15 +
-            (review_factor * 5) +  # Bonus for reviews
-            (rating_factor * 5)     # Bonus for high ratings
-        )
-        
+        # Base: Weighted SALT scores (90%), Bonuses (10%)
+        chatgpt_base = (semantic * 0.30 + authority * 0.25 + trust * 0.30 + location * 0.15)
+        chatgpt_bonus = (review_factor * 5 + rating_factor * 5)  # Max 10 pts bonus
+        chatgpt_score = int(chatgpt_base * 0.90 + chatgpt_bonus)
+
         # Perplexity - Values web presence, citations, recent content
-        # Weights: Authority 35%, Location 25%, Semantic 25%, Trust 15%
-        perplexity_score = int(
-            authority * 0.35 + 
-            location * 0.25 + 
-            semantic * 0.25 + 
-            trust * 0.15 +
-            (has_website * 8) +     # Strong bonus for website
-            (platforms * 2)          # Bonus for each platform
-        )
-        
+        # Base: Weighted SALT scores (85%), Bonuses (15%)
+        perplexity_base = (authority * 0.35 + location * 0.25 + semantic * 0.25 + trust * 0.15)
+        perplexity_bonus = (has_website * 8 + platform_factor * 7)  # Max 15 pts bonus
+        perplexity_score = int(perplexity_base * 0.85 + perplexity_bonus)
+
         # Claude (Anthropic) - Values trust signals, verified info, ethical presentation
-        # Weights: Trust 35%, Semantic 30%, Authority 20%, Location 15%
-        claude_score = int(
-            trust * 0.35 + 
-            semantic * 0.30 + 
-            authority * 0.20 + 
-            location * 0.15 +
-            (10 if p.license_status == 'Active' else 0) +  # Verified license bonus
-            (rating_factor * 5)
-        )
-        
+        # Base: Weighted SALT scores (88%), Bonuses (12%)
+        claude_base = (trust * 0.35 + semantic * 0.30 + authority * 0.20 + location * 0.15)
+        claude_bonus = (7 if p.license_status == 'Active' else 0) + (rating_factor * 5)  # Max 12 pts
+        claude_score = int(claude_base * 0.88 + claude_bonus)
+
         # Gemini (Google) - Values Google ecosystem, local SEO, structured data
-        # Weights: Location 35%, Authority 30%, Semantic 20%, Trust 15%
-        gemini_score = int(
-            location * 0.35 + 
-            authority * 0.30 + 
-            semantic * 0.20 + 
-            trust * 0.15 +
-            (review_factor * 8) +   # Google loves reviews
-            (has_website * 5)
-        )
-        
-        # Ensure scores are within bounds
+        # Base: Weighted SALT scores (87%), Bonuses (13%)
+        gemini_base = (location * 0.35 + authority * 0.30 + semantic * 0.20 + trust * 0.15)
+        gemini_bonus = (review_factor * 8 + has_website * 5)  # Max 13 pts bonus
+        gemini_score = int(gemini_base * 0.87 + gemini_bonus)
+
+        # Ensure scores are within bounds (0-100)
         return {
             'chatgpt': min(max(chatgpt_score, 0), 100),
             'perplexity': min(max(perplexity_score, 0), 100),

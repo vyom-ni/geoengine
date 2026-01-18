@@ -48,6 +48,14 @@ def server_error(e):
 def favicon():
     return '', 204  # No content
 
+@app.route('/images/<path:filename>')
+def serve_images(filename):
+    """Serve images from the images folder"""
+    import os
+    from flask import send_from_directory
+    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images')
+    return send_from_directory(images_dir, filename)
+
 @app.route('/health')
 def health_check():
     """Health check endpoint for monitoring"""
@@ -68,6 +76,29 @@ class Config:
 
 system = None
 _system_loading = False
+
+# In-memory cache for agent analysis results (avoids session cookie overflow)
+# Format: {agent_name_lower: {'data': result, 'timestamp': time}}
+_agent_cache = {}
+_cache_ttl = 300  # 5 minutes TTL
+
+def get_cached_agent(name):
+    """Get cached agent data if available and not expired"""
+    import time
+    key = name.lower().strip()
+    if key in _agent_cache:
+        entry = _agent_cache[key]
+        if time.time() - entry['timestamp'] < _cache_ttl:
+            return entry['data']
+        else:
+            del _agent_cache[key]
+    return None
+
+def set_cached_agent(name, data):
+    """Cache agent data with timestamp"""
+    import time
+    key = name.lower().strip()
+    _agent_cache[key] = {'data': data, 'timestamp': time.time()}
 
 def get_system(force_reload=False):
     """Get or initialize the global system instance (thread-safe singleton)"""
@@ -207,7 +238,8 @@ def search_agents():
 
 @app.route('/api/visibility/free', methods=['GET'])
 def free_visibility():
-    """Basic agent details - no login required. SALT scores require login."""
+    """Basic agent details - no login required. SALT scores require login.
+    Uses in-memory cache to avoid session cookie overflow."""
     name = request.args.get('name', '').strip()
     print(f"\n🔍 Visibility request for: '{name}'")
 
@@ -219,38 +251,32 @@ def free_visibility():
     is_logged_in = bool(user) and user.get('logged_in', False)
     is_admin = user.get('is_admin', False)
 
-    # Check session cache - but invalidate if login state changed
-    cache_key = f"agent_data_{name.lower()}"
-    cache_login_key = f"agent_login_{name.lower()}"
-    cached_login_state = session.get(cache_login_key, False)
+    # Check in-memory cache first (avoids cookie overflow issues)
+    result = get_cached_agent(name)
     
-    # Use cache only if login state hasn't changed
-    if cache_key in session and cached_login_state == is_logged_in:
-        print(f"✅ Using cached data for: {name}")
-        cached_data = session[cache_key]
-        # Update user status dynamically
-        cached_data['user_status'] = {
-            'logged_in': is_logged_in,
-            'is_admin': is_admin,
-            'paid': user.get('paid', False)
-        }
-        return jsonify(cached_data)
+    if result:
+        print(f"✅ Using cached analysis for: {name}")
+    else:
+        # No cache - fetch and analyze
+        try:
+            sys = get_system()
+            result = sys.analyze_agent(name)
+            print(f"✅ Analysis complete for: {name}")
 
-    try:
-        sys = get_system()
-        result = sys.analyze_agent(name)
-        print(f"✅ Analysis complete for: {name}")
-    except Exception as e:
-        print(f"❌ Error analyzing agent: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+            # Cache in memory (not in session to avoid cookie overflow)
+            if 'error' not in result:
+                set_cached_agent(name, result)
+        except Exception as e:
+            print(f"❌ Error analyzing agent: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
 
     if 'error' in result:
         print(f"❌ Agent not found: {name}")
         return jsonify({'error': result['error'], 'not_found': True}), 404
 
-    # Extract data
+    # Extract data from cached/fresh result
     agent = result['agent']
     analysis = result['analysis']
     lb = result.get('leaderboard_context', {})
@@ -321,17 +347,13 @@ def free_visibility():
         'requires_payment_for': ['full_report', 'competitors', 'action_plan']
     }
 
-    # Cache in session with login state
-    session[cache_key] = response_data
-    session[cache_login_key] = is_logged_in
-    session.modified = True
-
-    print(f"✅ Cached and returning data: score={overall_score}")
+    print(f"✅ Returning data: score={overall_score}")
     return jsonify(response_data)
 
 @app.route('/api/visibility/full', methods=['GET'])
 def full_visibility():
-    """Full visibility report - requires payment"""
+    """Full visibility report - requires payment.
+    Uses in-memory cache to avoid session cookie overflow."""
     user = session.get('user', {})
     if not user.get('paid'):
         return jsonify({'error': 'Payment required', 'upgrade_required': True}), 403
@@ -340,28 +362,31 @@ def full_visibility():
     if not name:
         return jsonify({'error': 'Agent name required'}), 400
 
-    # Check session cache first
-    cache_key = f"full_report_{name.lower()}"
-    if cache_key in session:
+    # Check in-memory cache first
+    result = get_cached_agent(name)
+    
+    if result:
         print(f"✅ Using cached full report for: {name}")
-        return jsonify(session[cache_key])
+        return jsonify(result)
 
+    # Not in cache - analyze and cache
     sys = get_system()
     result = sys.analyze_agent(name)
 
     if 'error' in result:
         return jsonify(result), 404
 
-    # Cache the full report
-    session[cache_key] = result
-    session.modified = True
-    print(f"✅ Cached full report for: {name}")
+    # Cache in memory (not session to avoid cookie overflow)
+    set_cached_agent(name, result)
+    print(f"✅ Analyzed and cached full report for: {name}")
+
+    return jsonify(result)
 
     return jsonify(result)
 
 @app.route('/api/agents/add', methods=['POST'])
 def add_agent():
-    """Add a new agent to the database"""
+    """Add a new agent to the database with duplicate prevention"""
     data = request.get_json() or {}
 
     # Validate required fields
@@ -373,23 +398,59 @@ def add_agent():
     try:
         import pandas as pd
 
-        # Generate unique Agent_ID
         sys = get_system()
+
+        # Check for duplicates - by name and city/state combination
+        full_name = data['full_name'].strip()
+        city = data['city'].strip()
+        state = data['state'].strip().upper()
+        phone = data['phone'].strip()
+
+        # Normalize for comparison
+        name_lower = full_name.lower()
+        city_lower = city.lower()
+
+        # Check if agent already exists (same name + location OR same phone)
+        # Normalize phone for comparison
+        phone_digits = ''.join(filter(str.isdigit, phone))
+
+        # Build duplicate check conditions
+        name_location_match = (
+            (sys.db.df['Full_Name'].str.lower().str.strip() == name_lower) &
+            (sys.db.df['City'].str.lower().str.strip() == city_lower) &
+            (sys.db.df['State'].str.upper().str.strip() == state)
+        )
+
+        # Check phone match only if Phone_Number column exists and has data
+        if 'Phone_Number' in sys.db.df.columns and phone_digits:
+            phone_match = sys.db.df['Phone_Number'].fillna('').astype(str).str.replace(r'[^\d]', '', regex=True) == phone_digits
+            existing = sys.db.df[name_location_match | phone_match]
+        else:
+            existing = sys.db.df[name_location_match]
+
+        if len(existing) > 0:
+            existing_agent = existing.iloc[0]
+            return jsonify({
+                'error': f'Agent already exists: {existing_agent["Full_Name"]} in {existing_agent["City"]}, {existing_agent["State"]}',
+                'duplicate': True,
+                'existing_agent': existing_agent['Full_Name']
+            }), 409
+
+        # Generate unique Agent_ID
         max_id = sys.db.df['Agent_ID'].astype(str).str.extract(r'(\d+)').astype(int).max()[0]
         new_id = f"AG{max_id + 1:06d}"
 
-        # Prepare new agent row
+        # Prepare new agent row with correct column names from database
         new_agent = {
             'Agent_ID': new_id,
-            'Full_Name': data['full_name'],
-            'City': data['city'],
-            'State': data['state'],
-            'Phone': data['phone'],
-            'Email': data.get('email', ''),
-            'Brokerage_Name': data.get('brokerage', ''),
-            'Website': data.get('website', ''),
-            'Years_Experience': data.get('years_experience', 0),
-            'Specialization': data.get('specialization', ''),
+            'Full_Name': full_name,
+            'City': city,
+            'State': state,
+            'Phone_Number': phone,
+            'Brokerage_Name': data.get('brokerage', '').strip(),
+            'Website_Links': data.get('website', '').strip(),
+            'Years_Experience': int(data.get('years_experience', 0) or 0),
+            'Specialization': data.get('specialization', '').strip(),
             'Average_Rating': 0,
             'Total_Reviews': 0,
             'Credibility_Score': 0
@@ -398,12 +459,59 @@ def add_agent():
         # Add to DataFrame
         sys.db.df = pd.concat([sys.db.df, pd.DataFrame([new_agent])], ignore_index=True)
 
-        # Save to Excel
+        # Update the name_lower column for the new agent (required for search indexing)
+        sys.db.df['name_lower'] = sys.db.df['Full_Name'].str.lower().str.strip()
+
+        # Save to Excel - try original file first, then backup if locked
         excel_path = Config.EXCEL_PATH
-        sys.db.df.to_excel(excel_path, index=False)
+        # Get columns to save (exclude internal computed columns)
+        save_columns = [col for col in sys.db.df.columns if col not in ['name_lower', 'rating_rank', 'review_rank', 'experience_rank', 'credibility_rank']]
+        
+        saved = False
+        save_message = ""
+        
+        # First, check if the file can be opened for writing
+        def is_file_locked(filepath):
+            if not os.path.exists(filepath):
+                return False
+            try:
+                with open(filepath, 'a'):
+                    pass
+                return False
+            except (IOError, PermissionError):
+                return True
+        
+        if is_file_locked(excel_path):
+            # File is locked - save to a backup file instead
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = excel_path.replace('.xlsx', f'_backup_{timestamp}.xlsx')
+            
+            try:
+                sys.db.df[save_columns].to_excel(backup_path, index=False)
+                print(f"⚠️ Original file locked. Saved to backup: {backup_path}")
+                saved = True
+                save_message = f"Agent added! Note: The main database file was locked (possibly open in Excel). Data was saved to backup file: {os.path.basename(backup_path)}. Please close Excel and merge the backup file."
+            except Exception as e:
+                print(f"❌ Could not save to backup either: {e}")
+                raise Exception(f"Could not save agent. Please close Excel and try again: {str(e)}")
+        else:
+            # File is not locked - save directly
+            try:
+                sys.db.df[save_columns].to_excel(excel_path, index=False)
+                print(f"✅ Saved to Excel: {excel_path} (total agents: {len(sys.db.df)})")
+                saved = True
+                save_message = f'Agent "{new_agent["Full_Name"]}" added successfully!'
+            except Exception as e:
+                print(f"❌ Error saving to Excel: {e}")
+                raise Exception(f"Could not save agent: {str(e)}")
+        
+        if not saved:
+            raise Exception("Failed to save agent to database")
 
         # Rebuild search cache
         sys.db._build_search_cache()
+        print(f"🔍 Search cache rebuilt with {len(sys.db.search_index)} keys")
 
         print(f"✅ Added new agent: {new_agent['Full_Name']} (ID: {new_id})")
 
@@ -411,7 +519,8 @@ def add_agent():
             'success': True,
             'agent_id': new_id,
             'agent_name': new_agent['Full_Name'],
-            'message': f'Agent added successfully! You can now search for {new_agent["Full_Name"]}.'
+            'message': save_message + ' Please refresh the page to see them in search suggestions.',
+            'refresh_required': True
         })
 
     except Exception as e:
@@ -617,9 +726,43 @@ FRONTEND_HTML = '''
                             </div>
                         </div>
 
-                        <p className="text-slate-500 text-xs mt-6 animate-pulse">Powered by Gemini AI</p>
+                        <p className="text-slate-500 text-xs mt-6 animate-pulse">Powered by Vieweo</p>
                     </div>
                 </div>
+            );
+        };
+
+        // ============== FOOTER SECTION WITH IMAGE ==============
+        const FooterSection = () => {
+            return (
+                <>
+                    {/* Industry News Section */}
+                    <div className="bg-gray-50 py-16">
+                        <div className="max-w-4xl mx-auto px-6">
+                            <h2 className="text-2xl font-bold text-gray-900 mb-3 text-center">AI is Transforming Real Estate</h2>
+                            <p className="text-gray-600 text-center mb-8">Stay ahead of the curve with the latest industry insights</p>
+                            <div className="bg-white rounded-xl shadow-lg overflow-hidden hover-lift">
+                                <img
+                                    src="/images/Section.png"
+                                    alt="Survey: 82% of Americans Use AI for Housing Market Information"
+                                    className="w-full h-auto"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Footer */}
+                    <footer className="bg-gray-900 text-white py-12">
+                        <div className="max-w-6xl mx-auto px-6">
+                            <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                                <div className="flex items-center gap-2">
+                                    <img src="/images/ViewoLogo.PNG" alt="Vieweo" className="h-8 w-auto" />
+                                </div>
+                                <p className="text-gray-400 text-sm">© 2026 Vieweo. AI Visibility Platform for Real Estate Professionals.</p>
+                            </div>
+                        </div>
+                    </footer>
+                </>
             );
         };
 
@@ -744,6 +887,7 @@ FRONTEND_HTML = '''
         const AddAgentModal = ({ show, onClose, onSuccess }) => {
             const [loading, setLoading] = useState(false);
             const [error, setError] = useState('');
+            const [successData, setSuccessData] = useState(null);
 
             if (!show) return null;
 
@@ -751,6 +895,7 @@ FRONTEND_HTML = '''
                 e.preventDefault();
                 setLoading(true);
                 setError('');
+                setSuccessData(null);
 
                 const formData = new FormData(e.target);
                 const data = {
@@ -775,8 +920,7 @@ FRONTEND_HTML = '''
                     const result = await r.json();
 
                     if (result.success) {
-                        onSuccess(result);
-                        onClose();
+                        setSuccessData(result);
                     } else {
                         setError(result.error || 'Failed to add agent');
                     }
@@ -787,11 +931,53 @@ FRONTEND_HTML = '''
                 }
             };
 
+            const handleRefreshPage = () => {
+                window.location.reload();
+            };
+
+            const handleClose = () => {
+                setSuccessData(null);
+                setError('');
+                onClose();
+            };
+
+            // Success state UI
+            if (successData) {
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+                        <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 my-8 relative animate-in text-center">
+                            <div className="w-20 h-20 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-900 mb-2">Agent Added Successfully!</h3>
+                            <p className="text-gray-600 mb-2">{successData.agent_name} has been added to the database.</p>
+                            <p className="text-sm text-gray-500 mb-6">Please refresh the page to see the new agent in search suggestions.</p>
+                            <div className="space-y-3">
+                                <button
+                                    onClick={handleRefreshPage}
+                                    className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-semibold rounded-xl hover:from-emerald-700 hover:to-teal-700 transition shadow-lg shadow-emerald-500/30"
+                                >
+                                    Refresh Page Now
+                                </button>
+                                <button
+                                    onClick={handleClose}
+                                    className="w-full py-3 bg-gray-100 text-gray-700 font-semibold rounded-xl hover:bg-gray-200 transition"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
             return (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
                     <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-8 my-8 relative animate-in">
                         <button
-                            onClick={onClose}
+                            onClick={handleClose}
                             className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100 transition"
                         >
                             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -885,12 +1071,7 @@ FRONTEND_HTML = '''
                         {/* Logo */}
                         <div className="flex items-center gap-8">
                             <div className="flex items-center gap-2">
-                                <div className="w-8 h-8 bg-[#006AFF] rounded-lg flex items-center justify-center">
-                                    <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-                                    </svg>
-                                </div>
-                                <span className="text-xl font-bold text-gray-900">Vieweo</span>
+                                <img src="/images/ViewoLogo.PNG" alt="Vieweo" className="h-8 w-auto" />
                             </div>
                             
                             {/* Nav Links */}
@@ -980,9 +1161,9 @@ FRONTEND_HTML = '''
                     <Navbar user={user} onLogin={onLogin} onLogout={onLogout} onAddAgent={onAddAgent} />
 
                     {/* Hero Section - Zillow Style */}
-                    <div className="relative overflow-hidden">
+                    <div className="relative pb-16">
                         {/* Background with overlay */}
-                        <div className="absolute inset-0">
+                        <div className="absolute inset-0 overflow-hidden">
                             <img
                                 src={RealEstateImages.hero}
                                 alt="Luxury real estate"
@@ -991,22 +1172,22 @@ FRONTEND_HTML = '''
                             <div className="absolute inset-0 bg-gradient-to-r from-[#1E3A5F]/95 via-[#1E3A5F]/80 to-transparent"/>
                         </div>
 
-                        <div className="relative z-10 max-w-7xl mx-auto px-6 py-20 lg:py-28">
+                        <div className="relative z-20 max-w-7xl mx-auto px-6 py-20 lg:py-28">
                             <div className="max-w-2xl">
                                 <span className="inline-block px-3 py-1 bg-[#00D395]/20 text-[#00D395] text-sm font-semibold rounded-full mb-4">
-                                    AI-Powered Agent Analytics
+                                    Proprietary AI visibility engine
                                 </span>
                                 <h1 className="text-4xl lg:text-5xl font-bold text-white mb-4 leading-tight">
-                                    Be the Agent<br/>
-                                    <span className="text-[#006AFF]">AI Recommends</span>
+                                    Real Estate you sell<br/>
+                                    <span className="text-[#006AFF]">AI visibility you own</span>
                                 </h1>
                                 <p className="text-lg text-gray-300 mb-8">
-                                    See how visible you are on ChatGPT, Claude, Perplexity, and Gemini.
+                                    See how visible you are on <b>AI Search</b>.
                                     Optimize your digital presence to capture more leads.
                                 </p>
 
                                 {/* Search Box - Clean Zillow Style */}
-                                <div className="relative">
+                                <div className="relative z-30">
                                     <div className="bg-white rounded-lg shadow-xl overflow-hidden">
                                         <div className="flex items-center">
                                             <div className="pl-4 text-gray-400">
@@ -1041,7 +1222,7 @@ FRONTEND_HTML = '''
 
                                 {/* Suggestions Dropdown */}
                                 {suggestions.length > 0 && (
-                                    <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-20 max-h-80 overflow-y-auto">
+                                    <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50 max-h-80 overflow-y-auto">
                                         {suggestions.map(s => (
                                             <button
                                                 key={s.id}
@@ -1079,14 +1260,26 @@ FRONTEND_HTML = '''
                     </div>
 
                     {/* AI Platforms Section */}
-                    <div className="bg-white border-y border-gray-200 py-12">
+                    <div className="relative z-10 bg-white border-y border-gray-200 py-12">
                         <div className="max-w-6xl mx-auto px-6">
                             <p className="text-center text-gray-500 text-sm mb-8">Optimize your visibility across leading AI platforms</p>
                             <div className="flex flex-wrap justify-center items-center gap-12">
-                                <img src={AILogos.chatgpt} alt="ChatGPT" className="h-8 opacity-60 hover:opacity-100 transition" />
-                                <img src={AILogos.claude} alt="Claude" className="h-6 opacity-60 hover:opacity-100 transition" />
-                                <img src={AILogos.perplexity} alt="Perplexity" className="h-8 opacity-60 hover:opacity-100 transition" />
-                                <img src={AILogos.gemini} alt="Gemini" className="h-7 opacity-60 hover:opacity-100 transition" />
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.chatgpt} alt="ChatGPT" className="h-8" />
+                                    <span className="text-xs font-medium text-gray-600">ChatGPT</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.claude} alt="Claude" className="h-6" />
+                                    <span className="text-xs font-medium text-gray-600">Claude</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.perplexity} alt="Perplexity" className="h-8" />
+                                    <span className="text-xs font-medium text-gray-600">Perplexity</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.gemini} alt="Gemini" className="h-7" />
+                                    <span className="text-xs font-medium text-gray-600">Gemini</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1160,49 +1353,63 @@ FRONTEND_HTML = '''
                     </div>
                     */}
 
-                    {/* Footer */}
-                    <footer className="bg-gray-900 text-white py-12">
-                        <div className="max-w-6xl mx-auto px-6">
-                            <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                                <div className="flex items-center gap-2">
-                                    <div className="w-8 h-8 bg-[#006AFF] rounded-lg flex items-center justify-center">
-                                        <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-                                            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-                                        </svg>
-                                    </div>
-                                    <span className="font-bold">Vieweo</span>
-                                </div>
-                                <p className="text-gray-400 text-sm">© 2026 Vieweo. AI Visibility Platform for Real Estate Professionals.</p>
-                            </div>
-                        </div>
-                    </footer>
+                    <FooterSection />
                 </div>
             );
         };
 
         // ============== SNAPSHOT PAGE ==============
-        const SnapshotPage = ({ agentName, user, onBack, onUpgrade, onLogin, onLogout, onAddAgent, onViewSALT }) => {
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(true);
+        const SnapshotPage = ({ agentName, user, onBack, onUpgrade, onLogin, onLogout, onAddAgent, onViewSALT, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
             const [showLoginModal, setShowLoginModal] = useState(false);
 
             const fetchData = useCallback(() => {
+                // Skip fetch if we already have cached data
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    return;
+                }
+                
                 setLoading(true);
                 fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
                     .then(r => r.json())
                     .then(d => {
                         setData(d);
+                        // Cache the data at parent level
+                        if (onDataLoaded && !d.error) {
+                            onDataLoaded(d);
+                        }
                         setLoading(false);
                     })
                     .catch(() => {
                         setData({error: 'Failed to load data'});
                         setLoading(false);
                     });
-            }, [agentName]);
+            }, [agentName, cachedData, onDataLoaded]);
 
             useEffect(() => {
-                fetchData();
-            }, [fetchData, user]);
+                // Only refetch if user login state changes and we need fresh SALT scores
+                if (cachedData && user?.logged_in !== cachedData?.user_status?.logged_in) {
+                    // User logged in/out - need to refresh for SALT scores
+                    setLoading(true);
+                    fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
+                        .then(r => r.json())
+                        .then(d => {
+                            setData(d);
+                            if (onDataLoaded && !d.error) {
+                                onDataLoaded(d);
+                            }
+                            setLoading(false);
+                        })
+                        .catch(() => {
+                            setLoading(false);
+                        });
+                } else {
+                    fetchData();
+                }
+            }, [fetchData, user?.logged_in]);
 
             if (loading) return <LoadingScreen title="Analyzing Visibility" subtitle="Computing AI discoverability metrics"/>;
 
@@ -1522,6 +1729,8 @@ FRONTEND_HTML = '''
                             fetchData();
                         }}
                     />
+
+                    <FooterSection />
                 </div>
             );
         };
@@ -1607,12 +1816,19 @@ FRONTEND_HTML = '''
         };
 
         // ============== FULL REPORT PAGE ==============
-        const FullReportPage = ({ agentName, user, onBack, onLogout, onAddAgent, onViewSALT }) => {
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(true);
+        const FullReportPage = ({ agentName, user, onBack, onLogout, onAddAgent, onViewSALT, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
             const [error, setError] = useState(null);
 
             useEffect(() => {
+                // Use cached data if available
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    return;
+                }
+                
                 setLoading(true);
                 setError(null);
                 fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
@@ -1625,6 +1841,10 @@ FRONTEND_HTML = '''
                             setError(d.error);
                         } else {
                             setData(d);
+                            // Cache at parent level
+                            if (onDataLoaded) {
+                                onDataLoaded(d);
+                            }
                         }
                         setLoading(false);
                     })
@@ -1632,7 +1852,7 @@ FRONTEND_HTML = '''
                         setError(e.message);
                         setLoading(false);
                     });
-            }, [agentName]);
+            }, [agentName, cachedData, onDataLoaded]);
 
             if (loading) return <LoadingScreen title="Generating Full Report" subtitle="Comprehensive AI visibility analysis"/>;
 
@@ -1972,28 +2192,41 @@ FRONTEND_HTML = '''
                             </div>
                         </div>
                     </div>
+
+                    <FooterSection />
                 </div>
             );
         };
 
         // ============== SALT DETAILS PAGE ==============
-        const SALTDetailsPage = ({ agentName, user, onBack, onLogout, onAddAgent }) => {
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(true);
+        const SALTDetailsPage = ({ agentName, user, onBack, onLogout, onAddAgent, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
 
             useEffect(() => {
+                // Use cached data if available
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    return;
+                }
+                
                 setLoading(true);
                 fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
                     .then(r => r.json())
                     .then(d => {
                         setData(d);
+                        // Cache at parent level
+                        if (onDataLoaded && !d.error) {
+                            onDataLoaded(d);
+                        }
                         setLoading(false);
                     })
                     .catch(() => {
                         setData({error: 'Failed to load data'});
                         setLoading(false);
                     });
-            }, [agentName]);
+            }, [agentName, cachedData, onDataLoaded]);
 
             if (loading) return <LoadingScreen title="Loading SALT Analysis" subtitle="Computing visibility metrics"/>;
 
@@ -2230,6 +2463,8 @@ FRONTEND_HTML = '''
                             </div>
                         </div>
                     </div>
+
+                    <FooterSection />
                 </div>
             );
         };
@@ -2241,6 +2476,10 @@ FRONTEND_HTML = '''
             const [agentName, setAgentName] = useState('');
             const [showLoginModal, setShowLoginModal] = useState(false);
             const [showAddAgentModal, setShowAddAgentModal] = useState(false);
+            
+            // Centralized cache for agent data - prevents repeated loading
+            const [agentDataCache, setAgentDataCache] = useState({});
+            const [fullReportCache, setFullReportCache] = useState({});
 
             // Check auth on mount
             useEffect(() => {
@@ -2257,12 +2496,18 @@ FRONTEND_HTML = '''
             const handleLogin = useCallback((userData) => {
                 setUser(userData);
                 setShowLoginModal(false);
+                // Clear cache on login to refresh with new permissions
+                setAgentDataCache({});
+                setFullReportCache({});
             }, []);
 
             const handleLogout = useCallback(async () => {
                 await fetch('/api/auth/logout', { method: 'POST' });
                 setUser(null);
                 setPage('search');
+                // Clear cache on logout
+                setAgentDataCache({});
+                setFullReportCache({});
             }, []);
 
             const handleSearch = useCallback((name) => {
@@ -2280,6 +2525,8 @@ FRONTEND_HTML = '''
 
             const handlePaymentSuccess = useCallback((userData) => {
                 setUser(userData);
+                // Clear full report cache to refetch with paid status
+                setFullReportCache({});
                 setPage('report');
             }, []);
 
@@ -2290,6 +2537,9 @@ FRONTEND_HTML = '''
             const handleAddAgentSuccess = useCallback((result) => {
                 alert(result.message);
                 setShowAddAgentModal(false);
+                // Clear cache for new agent
+                setAgentDataCache({});
+                setFullReportCache({});
                 handleSearch(result.agent_name);
             }, [handleSearch]);
 
@@ -2318,6 +2568,8 @@ FRONTEND_HTML = '''
                             onLogout={handleLogout}
                             onAddAgent={handleAddAgent}
                             onViewSALT={handleViewSALT}
+                            cachedData={agentDataCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setAgentDataCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
                         />
                     )}
                     {page === 'paywall' && (
@@ -2338,6 +2590,8 @@ FRONTEND_HTML = '''
                             onLogout={handleLogout}
                             onAddAgent={handleAddAgent}
                             onViewSALT={handleViewSALT}
+                            cachedData={fullReportCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setFullReportCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
                         />
                     )}
                     {page === 'salt' && (
@@ -2347,6 +2601,8 @@ FRONTEND_HTML = '''
                             onBack={() => setPage(user?.paid ? 'report' : 'snapshot')}
                             onLogout={handleLogout}
                             onAddAgent={handleAddAgent}
+                            cachedData={fullReportCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setFullReportCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
                         />
                     )}
 
