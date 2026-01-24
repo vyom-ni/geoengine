@@ -68,7 +68,7 @@ def health_check():
 
 # Configuration
 class Config:
-    EXCEL_PATH = os.environ.get('EXCEL_PATH', 'US_Real_Estate_Agents_Database.xlsx')
+    EXCEL_PATH = os.environ.get('EXCEL_PATH', 'US_Real_Estate_Agents_Database2.xlsx')
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
     OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
