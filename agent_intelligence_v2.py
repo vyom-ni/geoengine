@@ -1636,16 +1636,50 @@ Return ONLY valid JSON, no markdown."""
 
 
 class AgentDatabase:
+    # Column name mappings: expected_name -> list of possible actual names
+    COLUMN_MAPPINGS = {
+        'Full_Name': ['Full_Name', 'Realtor Name', 'Agent Name', 'Name'],
+        'Agent_ID': ['Agent_ID', 'Realtor ID', 'ID'],
+        'Brokerage_Name': ['Brokerage_Name', 'Brokerage', 'Brokerage '],
+        'City': ['City', 'Office (Source Google Business Profile)'],
+        'State': ['State'],
+        'Phone_Number': ['Phone_Number', 'Phone number', 'Phone'],
+    }
+
     def __init__(self, excel_path: str):
         print(f"📂 Loading Excel database from: {excel_path}")
         self.df = pd.read_excel(excel_path)
         print(f"✅ Loaded {len(self.df)} records")
+        
+        # Normalize column names - map actual columns to expected names
+        self._normalize_columns()
+        
         self.df['name_lower'] = self.df['Full_Name'].str.lower().str.strip()
         print(f"⚙️  Computing rankings...")
         self._compute_rankings()
         print(f"🔍 Building search cache...")
         self._build_search_cache()
         print(f"✅ Database ready with {len(self.search_index)} search keys")
+
+    def _normalize_columns(self):
+        """Normalize column names to expected format by mapping various possible names"""
+        actual_columns = list(self.df.columns)
+        print(f"📋 Found columns: {actual_columns}")
+        
+        for expected_name, possible_names in self.COLUMN_MAPPINGS.items():
+            if expected_name in actual_columns:
+                continue  # Column already exists with expected name
+            
+            # Look for matching column
+            for possible_name in possible_names:
+                if possible_name in actual_columns:
+                    print(f"   Mapping '{possible_name}' → '{expected_name}'")
+                    self.df[expected_name] = self.df[possible_name]
+                    break
+            else:
+                # No matching column found - create empty column
+                print(f"   ⚠️  No column found for '{expected_name}', creating empty")
+                self.df[expected_name] = ''
 
     def _build_search_cache(self):
         """Build comprehensive search index for fast lookup with partial matching"""
@@ -1944,7 +1978,16 @@ class AgentIntelligenceSystem:
 
         # Search returns simplified dict, need to get full record from DataFrame
         agent_id = results[0]['id']
-        full_record = self.db.df[self.db.df['Agent_ID'] == agent_id].iloc[0].to_dict()
+        
+        # Try exact match first, then string comparison
+        matches = self.db.df[self.db.df['Agent_ID'] == agent_id]
+        if matches.empty:
+            matches = self.db.df[self.db.df['Agent_ID'].astype(str) == str(agent_id)]
+        
+        if matches.empty:
+            return {"error": f"Agent ID '{agent_id}' not found in database"}
+        
+        full_record = matches.iloc[0].to_dict()
         profile = self.db.record_to_profile(full_record)
         leaderboard = self.db.get_leaderboard_context(profile.agent_id)
         
