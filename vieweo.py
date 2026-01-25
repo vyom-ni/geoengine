@@ -292,6 +292,13 @@ def free_visibility():
     # Debug log the scores
     print(f"📊 SALT Scores - S:{semantic_score} A:{authority_score} L:{location_score} T:{trust_score} Overall:{overall_score}")
 
+    # Get years of experience - prefer scraped data from web, fallback to database
+    web_signals = analysis.get('web_signals_summary', {})
+    scraped_years_experience = web_signals.get('years_experience', 0)
+    db_years_experience = agent.get('experience', {}).get('years', 0)
+    years_experience = scraped_years_experience if scraped_years_experience > 0 else db_years_experience
+    print(f"📅 Years Experience - Scraped: {scraped_years_experience}, DB: {db_years_experience}, Using: {years_experience}")
+
     # Build response with tiered access
     response_data = {
         # TIER 1: Always visible (no login required)
@@ -300,7 +307,7 @@ def free_visibility():
             'city': agent.get('location', {}).get('city', ''),
             'state': agent.get('location', {}).get('state', ''),
             'brokerage': agent.get('brokerage', ''),
-            'years_experience': agent.get('experience', {}).get('years', 0),
+            'years_experience': years_experience,  # Prefer scraped data
             'phone': agent.get('phone', ''),
             'email': agent.get('email', ''),
             'website': agent.get('online_presence', {}).get('website', ''),
@@ -309,6 +316,14 @@ def free_visibility():
             'average_rating': agent.get('reviews', {}).get('average_rating', 0),
             'total_reviews': agent.get('reviews', {}).get('total_count', 0),
             'specialization': agent.get('experience', {}).get('specialization', ''),
+        },
+        # Scraped review data from web sources
+        'scraped_data': {
+            'web_signals': analysis.get('web_signals_summary', {}),
+            'review_sources': analysis.get('web_signals_summary', {}).get('review_sources', {}),
+            'listings': analysis.get('web_signals_summary', {}).get('listings', {}),
+            'sources_checked': analysis.get('web_signals_summary', {}).get('sources_list', []),
+            'collection_errors': analysis.get('web_signals_summary', {}).get('error_details', []),
         },
         'visibility_score': overall_score,
         'visibility_grade': scores.get('overall', {}).get('grade', 'N/A'),
@@ -1536,9 +1551,6 @@ FRONTEND_HTML = '''
                                             </span>
                                         </div>
                                         <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2">
-                                            <span className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-xs font-medium">
-                                                {data.agent.years_experience || 0}+ Years
-                                            </span>
                                             {data.basic_metrics.average_rating > 0 && (
                                                 <span className="px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-xs font-medium flex items-center gap-1">
                                                     <svg className="w-3 h-3 fill-amber-500" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
@@ -1620,19 +1632,6 @@ FRONTEND_HTML = '''
                                             </div>
                                         ))}
                                     </div>
-
-                                    {data.ranking_preview && (
-                                        <div className="mt-4 p-4 bg-[#006AFF]/5 rounded-lg border border-[#006AFF]/20">
-                                            <div className="flex items-center justify-center gap-2">
-                                                <svg className="w-5 h-5 text-[#006AFF]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z"/>
-                                                </svg>
-                                                <span className="text-sm font-medium text-gray-700">
-                                                    Ranked <span className="text-[#006AFF] font-bold">#{data.ranking_preview.state_rank}</span> of {data.ranking_preview.state_total} agents in {data.ranking_preview.state}
-                                                </span>
-                                            </div>
-                                        </div>
-                                    )}
                                 </div>
 
                                 {/* LLM Visibility Scores with Real Logos */}
