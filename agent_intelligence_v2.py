@@ -47,14 +47,23 @@ try:
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
-    print("⚠️ requests library not available - web scraping disabled")
+    print("[WARNING] requests library not available - web scraping disabled")
 
 try:
     from bs4 import BeautifulSoup
     BS4_AVAILABLE = True
 except ImportError:
     BS4_AVAILABLE = False
-    print("⚠️ BeautifulSoup not available - HTML parsing limited")
+    print("[WARNING] BeautifulSoup not available - HTML parsing limited")
+
+try:
+    import googlemaps
+    from dotenv import load_dotenv
+    GOOGLEMAPS_AVAILABLE = True
+    load_dotenv()  # Load .env file
+except ImportError:
+    GOOGLEMAPS_AVAILABLE = False
+    print("[WARNING] googlemaps library not available - Google Places API disabled")
 
 # Try to import AI libraries
 try:
@@ -138,6 +147,7 @@ class AgentSeed:
     facebook_url: str = ""
     twitter_url: str = ""
     linkedin_url: str = ""
+    youtube_url: str = ""
     # Marketplace URLs from Test RE.xlsx
     zillow_url: str = ""
     homes_url: str = ""
@@ -196,6 +206,7 @@ class InputSeedLayer:
         facebook_url = safe_str('Facebook_URL') or safe_str('Facebook')
         twitter_url = safe_str('Twitter_URL') or safe_str('Twitter')
         linkedin_url = safe_str('LinkedIn_URL') or safe_str('Linkedin')
+        youtube_url = safe_str('Youtube_URL') or safe_str('Youtube')
         
         # Additional URLs from Test RE.xlsx
         zillow_url = safe_str('Zillow ') or safe_str('Zillow')
@@ -217,6 +228,7 @@ class InputSeedLayer:
             facebook_url=facebook_url,
             twitter_url=twitter_url,
             linkedin_url=linkedin_url,
+            youtube_url=youtube_url,
             zillow_url=zillow_url,
             homes_url=homes_url,
             realtor_url=realtor_url,
@@ -289,6 +301,28 @@ class WebSignals:
     # Experience signals (scraped from Zillow, etc.)
     years_experience: int = 0
     
+    # Review sentiment keywords (extracted from review text)
+    sentiment_keywords: Dict[str, int] = field(default_factory=lambda: {
+        'responsive': 0,
+        'helpful': 0,
+        'expert': 0,
+        'professional': 0,
+        'knowledgeable': 0,
+        'patient': 0,
+        'friendly': 0,
+        'trustworthy': 0,
+        'communicative': 0,
+        'dedicated': 0
+    })
+    
+    # Entity verification for Identity Ledger
+    entity_verification: Dict[str, Dict] = field(default_factory=lambda: {
+        'canonical_name': {'value': '', 'platform': '', 'verified': False},
+        'primary_role': {'value': '', 'platform': '', 'verified': False},
+        'brokerage_anchor': {'value': '', 'platform': '', 'verified': False},
+        'license_node': {'value': '', 'platform': '', 'verified': False}
+    })
+    
     # Brokerage verification
     brokerage_name: str = ""
     brokerage_verified: bool = False
@@ -323,7 +357,20 @@ class WebSignalLayer:
         self.timeout = timeout
         self.session = requests.Session() if REQUESTS_AVAILABLE else None
         self._cache: Dict[str, Tuple[WebSignals, float]] = {}  # URL -> (signals, timestamp)
-        
+
+        # Initialize Google Places API client
+        self.gmaps_client = None
+        if GOOGLEMAPS_AVAILABLE:
+            google_api_key = os.getenv('GOOGLE_PLACES_API_KEY')
+            if google_api_key:
+                try:
+                    self.gmaps_client = googlemaps.Client(key=google_api_key)
+                    print("[OK] Google Places API initialized")
+                except Exception as e:
+                    print(f"[WARNING] Failed to initialize Google Places API: {e}")
+            else:
+                print("[WARNING] GOOGLE_PLACES_API_KEY not found in .env file")
+
         if self.session:
             # Set realistic browser headers to avoid bot detection
             self.session.headers.update({
@@ -369,6 +416,9 @@ class WebSignalLayer:
         
         # Calculate totals from verified sources only
         self._calculate_verified_totals(signals)
+        
+        # Populate entity verification for Identity Ledger
+        self._populate_entity_verification(seed, signals)
         
         return signals
     
@@ -441,7 +491,7 @@ class WebSignalLayer:
                                 exp = exp_val
                             if 0 < exp < 60:  # Reasonable range
                                 signals.years_experience = exp
-                                print(f"      ✓ Personal website years experience found: {exp}")
+                                print(f"      [OK] Personal website years experience found: {exp}")
                                 break
             else:
                 signals.collection_errors.append(f"Website returned status {response.status_code}")
@@ -506,62 +556,128 @@ class WebSignalLayer:
                 print(f"      Zillow response: {response.status_code}, length: {len(response.text)}")
                 if response.status_code == 200:
                     text = response.text
-                    # Multiple patterns for review extraction - more comprehensive
-                    review_patterns = [
-                        r'"reviewCount"\s*:\s*(\d+)',
-                        r'"numReviews"\s*:\s*(\d+)',
-                        r'"totalReviews"\s*:\s*(\d+)',
-                        r'(\d+)\s*(?:client\s+)?reviews?',
-                        r'reviewCount["\']?\s*:\s*(\d+)',
-                        r'"review_count"\s*:\s*(\d+)',
-                        r'>(\d+)\s*Reviews?<',
-                        r'Reviews\s*\((\d+)\)',
-                    ]
-                    for pattern in review_patterns:
-                        review_match = re.search(pattern, text, re.IGNORECASE)
-                        if review_match:
-                            count = int(review_match.group(1))
-                            if count > 0 and count < 10000:  # Sanity check
-                                signals.zillow_review_count = count
-                                print(f"      ✓ Zillow reviews found: {count}")
-                                break
-                    
-                    # Multiple patterns for rating extraction
-                    rating_patterns = [
-                        r'"avgRating"\s*:\s*(\d+\.?\d*)',
-                        r'"rating"\s*:\s*(\d+\.?\d*)',
-                        r'"ratingValue"\s*:\s*(\d+\.?\d*)',
-                        r'(\d+\.?\d*)\s*(?:out of|/)\s*5',
-                        r'rating["\']?\s*:\s*(\d+\.?\d*)',
-                        r'"rating_average"\s*:\s*(\d+\.?\d*)',
-                        r'>(\d+\.?\d*)\s*stars?<',
-                    ]
-                    for pattern in rating_patterns:
-                        rating_match = re.search(pattern, text, re.IGNORECASE)
-                        if rating_match:
-                            rating = float(rating_match.group(1))
-                            if 0 < rating <= 5:  # Valid rating range
-                                signals.zillow_rating = rating
-                                print(f"      ✓ Zillow rating found: {rating}")
-                                break
-                    
-                    # Check for listings
+
+                    # Try BeautifulSoup extraction first (more reliable)
+                    if BS4_AVAILABLE:
+                        soup = BeautifulSoup(text, 'html.parser')
+
+                        # Extract from JSON-LD structured data
+                        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+                        for script in json_ld_scripts:
+                            try:
+                                data = json.loads(script.string)
+                                if isinstance(data, list):
+                                    for item in data:
+                                        if self._extract_zillow_from_json_ld(item, signals):
+                                            print(f"      [OK] Zillow data from JSON-LD")
+                                else:
+                                    if self._extract_zillow_from_json_ld(data, signals):
+                                        print(f"      [OK] Zillow data from JSON-LD")
+                            except json.JSONDecodeError:
+                                continue
+
+                        # Look for review data in page structure
+                        if signals.zillow_review_count == 0:
+                            # Check data attributes
+                            for elem in soup.find_all(attrs={"data-testid": True}):
+                                test_id = elem.get('data-testid', '')
+                                if 'review' in test_id.lower():
+                                    elem_text = elem.get_text()
+                                    review_match = re.search(r'(\d+)\s*reviews?', elem_text, re.IGNORECASE)
+                                    if review_match:
+                                        count = int(review_match.group(1))
+                                        if count > 0 and count < 10000:
+                                            signals.zillow_review_count = count
+                                            print(f"      [OK] Zillow reviews from testid: {count}")
+                                            break
+
+                        # Extract rating from visible elements
+                        if signals.zillow_rating == 0:
+                            # Look for rating in span/div elements
+                            for elem in soup.find_all(['span', 'div'], class_=re.compile(r'rating', re.I)):
+                                elem_text = elem.get_text()
+                                rating_match = re.search(r'(\d+\.?\d*)', elem_text)
+                                if rating_match:
+                                    rating = float(rating_match.group(1))
+                                    if 0 < rating <= 5:
+                                        signals.zillow_rating = rating
+                                        print(f"      [OK] Zillow rating from element: {rating}")
+                                        break
+
+                    # Fallback: comprehensive regex patterns
+                    if signals.zillow_review_count == 0:
+                        review_patterns = [
+                            r'"reviewCount"\s*:\s*(\d+)',
+                            r'"numReviews"\s*:\s*(\d+)',
+                            r'"totalReviews"\s*:\s*(\d+)',
+                            r'"review_count"\s*:\s*(\d+)',
+                            r'reviewCount["\']?\s*:\s*(\d+)',
+                            r'(\d+)\s*(?:client\s+)?reviews?\s*(?:\(|on Zillow)',
+                            r'>(\d+)\s*Reviews?<',
+                            r'Reviews\s*\((\d+)\)',
+                            r'data-test="reviews-count"[^>]*>(\d+)',
+                            r'"reviews":\s*{\s*"count"\s*:\s*(\d+)',
+                            r'REVIEWS_COUNT["\s:]+(\d+)',
+                        ]
+                        for pattern in review_patterns:
+                            review_match = re.search(pattern, text, re.IGNORECASE)
+                            if review_match:
+                                try:
+                                    count = int(review_match.group(1))
+                                    if count > 0 and count < 10000:
+                                        signals.zillow_review_count = count
+                                        print(f"      [OK] Zillow reviews found via regex: {count}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Rating extraction
+                    if signals.zillow_rating == 0:
+                        rating_patterns = [
+                            r'"avgRating"\s*:\s*(\d+\.?\d*)',
+                            r'"rating"\s*:\s*(\d+\.?\d*)',
+                            r'"ratingValue"\s*:\s*(\d+\.?\d*)',
+                            r'"rating_average"\s*:\s*(\d+\.?\d*)',
+                            r'(\d+\.?\d*)\s*(?:out of|/)\s*5',
+                            r'rating["\']?\s*:\s*(\d+\.?\d*)',
+                            r'>(\d+\.?\d*)\s*stars?<',
+                            r'data-test="rating-value"[^>]*>(\d+\.?\d*)',
+                            r'"averageRating":\s*(\d+\.?\d*)',
+                        ]
+                        for pattern in rating_patterns:
+                            rating_match = re.search(pattern, text, re.IGNORECASE)
+                            if rating_match:
+                                try:
+                                    rating = float(rating_match.group(1))
+                                    if 0 < rating <= 5:
+                                        signals.zillow_rating = rating
+                                        print(f"      [OK] Zillow rating found via regex: {rating}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Listings extraction
                     listing_patterns = [
                         r'"activeListings"\s*:\s*(\d+)',
                         r'"forSaleCount"\s*:\s*(\d+)',
-                        r'(\d+)\s*(?:active\s+)?listings?',
+                        r'"active_listings"\s*:\s*(\d+)',
+                        r'(\d+)\s*(?:active|for sale)\s*listings?',
                         r'activeListingCount["\']?\s*:\s*(\d+)',
+                        r'"listingCount":\s*(\d+)',
                     ]
                     for pattern in listing_patterns:
                         listing_match = re.search(pattern, text, re.IGNORECASE)
                         if listing_match:
-                            count = int(listing_match.group(1))
-                            if count > 0 and count < 1000:
-                                signals.active_listing_count += count
-                                print(f"      ✓ Zillow listings found: {count}")
-                                break
-                    
-                    # Extract years of experience from Zillow
+                            try:
+                                count = int(listing_match.group(1))
+                                if count > 0 and count < 1000:
+                                    signals.active_listing_count += count
+                                    print(f"      [OK] Zillow listings found: {count}")
+                                    break
+                            except (ValueError, IndexError):
+                                continue
+
+                    # Years of experience
                     experience_patterns = [
                         r'"yearsOfExperience"\s*:\s*(\d+)',
                         r'"years_experience"\s*:\s*(\d+)',
@@ -577,11 +693,20 @@ class WebSignalLayer:
                     for pattern in experience_patterns:
                         exp_match = re.search(pattern, text, re.IGNORECASE)
                         if exp_match:
-                            years = int(exp_match.group(1))
-                            if 0 < years < 60:  # Reasonable range for experience
-                                signals.years_experience = years
-                                print(f"      ✓ Zillow years of experience found: {years}")
-                                break
+                            try:
+                                years = int(exp_match.group(1))
+                                if 0 < years < 60:
+                                    signals.years_experience = years
+                                    print(f"      [OK] Zillow years of experience found: {years}")
+                                    break
+                            except (ValueError, IndexError):
+                                continue
+
+                    # Extract sentiment keywords from Zillow reviews
+                    self._extract_sentiment_keywords(text, signals)
+
+                    if signals.zillow_review_count == 0:
+                        print(f"      [WARNING] Zillow reviews not extracted - page may be JavaScript-rendered")
                 else:
                     signals.collection_errors.append(f"Zillow returned status {response.status_code}")
             except requests.exceptions.RequestException as e:
@@ -613,7 +738,7 @@ class WebSignalLayer:
                             count = int(review_match.group(1))
                             if count > 0 and count < 10000:
                                 signals.realtor_review_count = count
-                                print(f"      ✓ Realtor reviews found: {count}")
+                                print(f"      [OK] Realtor reviews found: {count}")
                                 break
                     
                     # Multiple patterns for rating extraction
@@ -630,7 +755,7 @@ class WebSignalLayer:
                             rating = float(rating_match.group(1))
                             if 0 < rating <= 5:
                                 signals.realtor_rating = rating
-                                print(f"      ✓ Realtor rating found: {rating}")
+                                print(f"      [OK] Realtor rating found: {rating}")
                                 break
                     
                     # Check for active and sold listings
@@ -676,8 +801,11 @@ class WebSignalLayer:
                                 years = int(exp_match.group(1))
                                 if 0 < years < 60:
                                     signals.years_experience = years
-                                    print(f"      ✓ Realtor years of experience found: {years}")
+                                    print(f"      [OK] Realtor years of experience found: {years}")
                                     break
+                    
+                    # Extract sentiment keywords from Realtor.com reviews
+                    self._extract_sentiment_keywords(text, signals)
                 else:
                     signals.collection_errors.append(f"Realtor returned status {response.status_code}")
             except requests.exceptions.RequestException as e:
@@ -694,39 +822,129 @@ class WebSignalLayer:
                 print(f"      Homes response: {response.status_code}, length: {len(response.text)}")
                 if response.status_code == 200:
                     text = response.text
-                    # Extract reviews and ratings from Homes.com
+
+                    # Try BeautifulSoup extraction first
+                    if BS4_AVAILABLE:
+                        soup = BeautifulSoup(text, 'html.parser')
+
+                        # Extract from JSON-LD structured data
+                        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+                        for script in json_ld_scripts:
+                            try:
+                                data = json.loads(script.string)
+                                if isinstance(data, list):
+                                    for item in data:
+                                        # Extract into a temporary holder
+                                        temp_reviews = 0
+                                        temp_rating = 0.0
+
+                                        schema_type = item.get('@type', '')
+                                        if isinstance(schema_type, str):
+                                            schema_type = [schema_type]
+
+                                        relevant_types = ['RealEstateAgent', 'Person', 'LocalBusiness', 'ProfessionalService']
+                                        if any(t in schema_type for t in relevant_types):
+                                            agg_rating = item.get('aggregateRating', {})
+                                            if agg_rating:
+                                                rating_val = agg_rating.get('ratingValue', 0)
+                                                review_count = agg_rating.get('reviewCount', 0) or agg_rating.get('ratingCount', 0)
+
+                                                if rating_val:
+                                                    try:
+                                                        temp_rating = float(rating_val)
+                                                    except (ValueError, TypeError):
+                                                        pass
+
+                                                if review_count:
+                                                    try:
+                                                        temp_reviews = int(review_count)
+                                                    except (ValueError, TypeError):
+                                                        pass
+
+                                        # Add to realtor counts (Homes.com aggregates with Realtor.com)
+                                        if temp_reviews > 0:
+                                            signals.realtor_review_count += temp_reviews
+                                            print(f"      [OK] Homes reviews from JSON-LD: {temp_reviews}")
+                                        if temp_rating > 0 and signals.realtor_rating == 0:
+                                            signals.realtor_rating = temp_rating
+                                            print(f"      [OK] Homes rating from JSON-LD: {temp_rating}")
+                                else:
+                                    # Single object case
+                                    schema_type = data.get('@type', '')
+                                    if isinstance(schema_type, str):
+                                        schema_type = [schema_type]
+
+                                    relevant_types = ['RealEstateAgent', 'Person', 'LocalBusiness', 'ProfessionalService']
+                                    if any(t in schema_type for t in relevant_types):
+                                        agg_rating = data.get('aggregateRating', {})
+                                        if agg_rating:
+                                            rating_val = agg_rating.get('ratingValue', 0)
+                                            review_count = agg_rating.get('reviewCount', 0) or agg_rating.get('ratingCount', 0)
+
+                                            if review_count:
+                                                try:
+                                                    signals.realtor_review_count += int(review_count)
+                                                    print(f"      [OK] Homes reviews from JSON-LD: {review_count}")
+                                                except (ValueError, TypeError):
+                                                    pass
+
+                                            if rating_val and signals.realtor_rating == 0:
+                                                try:
+                                                    signals.realtor_rating = float(rating_val)
+                                                    print(f"      [OK] Homes rating from JSON-LD: {rating_val}")
+                                                except (ValueError, TypeError):
+                                                    pass
+                            except json.JSONDecodeError:
+                                continue
+
+                    # Fallback: regex extraction
+                    homes_reviews_extracted = False
                     review_patterns = [
                         r'"reviewCount"\s*:\s*(\d+)',
                         r'"review_count"\s*:\s*(\d+)',
-                        r'(\d+)\s*reviews?',
+                        r'"numReviews"\s*:\s*(\d+)',
+                        r'(\d+)\s*reviews?\s*on\s*Homes',
                         r'>(\d+)\s*Reviews?<',
+                        r'Reviews\s*\((\d+)\)',
+                        r'data-review-count[="\s:]+(\d+)',
                     ]
                     for pattern in review_patterns:
                         review_match = re.search(pattern, text, re.IGNORECASE)
                         if review_match:
-                            homes_reviews = int(review_match.group(1))
-                            if homes_reviews > 0 and homes_reviews < 10000:
-                                # Add to realtor_review_count as aggregate
-                                signals.realtor_review_count += homes_reviews
-                                print(f"      ✓ Homes reviews found: {homes_reviews}")
-                                break
-                    
-                    rating_patterns = [
-                        r'"rating"\s*:\s*(\d+\.?\d*)',
-                        r'"avgRating"\s*:\s*(\d+\.?\d*)',
-                        r'(\d+\.?\d*)\s*(?:out of|/)\s*5',
-                    ]
-                    for pattern in rating_patterns:
-                        rating_match = re.search(pattern, text, re.IGNORECASE)
-                        if rating_match:
-                            rating = float(rating_match.group(1))
-                            # Use homes rating if realtor rating not set
-                            if 0 < rating <= 5 and signals.realtor_rating == 0:
-                                signals.realtor_rating = rating
-                                print(f"      ✓ Homes rating found: {rating}")
-                                break
-                    
-                    # Extract years of experience from Homes.com if not found from Zillow/Realtor
+                            try:
+                                homes_reviews = int(review_match.group(1))
+                                if homes_reviews > 0 and homes_reviews < 10000:
+                                    # Add to realtor_review_count as aggregate
+                                    signals.realtor_review_count += homes_reviews
+                                    print(f"      [OK] Homes reviews found via regex: {homes_reviews}")
+                                    homes_reviews_extracted = True
+                                    break
+                            except (ValueError, IndexError):
+                                continue
+
+                    # Rating extraction
+                    if signals.realtor_rating == 0:
+                        rating_patterns = [
+                            r'"rating"\s*:\s*(\d+\.?\d*)',
+                            r'"avgRating"\s*:\s*(\d+\.?\d*)',
+                            r'"ratingValue"\s*:\s*(\d+\.?\d*)',
+                            r'(\d+\.?\d*)\s*(?:out of|/)\s*5',
+                            r'>(\d+\.?\d*)\s*stars?<',
+                            r'data-rating[="\s:]+(\d+\.?\d*)',
+                        ]
+                        for pattern in rating_patterns:
+                            rating_match = re.search(pattern, text, re.IGNORECASE)
+                            if rating_match:
+                                try:
+                                    rating = float(rating_match.group(1))
+                                    if 0 < rating <= 5:
+                                        signals.realtor_rating = rating
+                                        print(f"      [OK] Homes rating found via regex: {rating}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Extract years of experience if not found yet
                     if signals.years_experience == 0:
                         experience_patterns = [
                             r'"yearsOfExperience"\s*:\s*(\d+)',
@@ -741,73 +959,371 @@ class WebSignalLayer:
                         for pattern in experience_patterns:
                             exp_match = re.search(pattern, text, re.IGNORECASE)
                             if exp_match:
-                                exp = int(exp_match.group(1))
-                                if 0 < exp < 60:  # Reasonable range
-                                    signals.years_experience = exp
-                                    print(f"      ✓ Homes.com years experience found: {exp}")
-                                    break
+                                try:
+                                    exp = int(exp_match.group(1))
+                                    if 0 < exp < 60:
+                                        signals.years_experience = exp
+                                        print(f"      [OK] Homes.com years experience found: {exp}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Extract sentiment from reviews
+                    self._extract_sentiment_keywords(text, signals)
+
+                    if not homes_reviews_extracted and signals.realtor_review_count == 0:
+                        print(f"      [WARNING] Homes.com reviews not extracted - page may be JavaScript-rendered")
                 else:
                     signals.collection_errors.append(f"Homes returned status {response.status_code}")
             except requests.exceptions.RequestException as e:
                 signals.collection_errors.append(f"Homes.com error: {str(e)[:50]}")
-    
+
+    def _check_google_with_places_api(self, seed: AgentSeed, signals: WebSignals) -> bool:
+        """
+        Check Google Business presence using Google Places API.
+
+        Returns True if data was successfully fetched from API.
+        """
+        if not self.gmaps_client:
+            return False
+
+        try:
+            # Build search query from agent name and location
+            query = f"{seed.full_name} real estate agent"
+            if seed.city:
+                query += f" {seed.city}"
+            if seed.state:
+                query += f" {seed.state}"
+
+            print(f"      Google Places API search: {query}")
+
+            # Use Text Search to find the place
+            # First try with type filter
+            places_result = self.gmaps_client.places(query=query, type='real_estate_agency')
+
+            # If no results, try without type filter (more flexible)
+            if not places_result.get('results') or places_result.get('status') == 'ZERO_RESULTS':
+                print(f"      No results with type filter, trying without...")
+                places_result = self.gmaps_client.places(query=query)
+
+            if places_result.get('status') == 'OK' and places_result.get('results'):
+                # Get the first result (most relevant)
+                place = places_result['results'][0]
+                place_id = place.get('place_id')
+
+                if place_id:
+                    # Get detailed information including reviews
+                    details = self.gmaps_client.place(
+                        place_id=place_id,
+                        fields=['name', 'rating', 'user_ratings_total', 'reviews', 'url']
+                    )
+
+                    if details.get('status') == 'OK':
+                        result = details.get('result', {})
+
+                        # Extract rating and review count
+                        if 'rating' in result:
+                            signals.google_rating = float(result['rating'])
+                            print(f"      [OK] Google Places API rating: {signals.google_rating}")
+
+                        if 'user_ratings_total' in result:
+                            signals.google_review_count = int(result['user_ratings_total'])
+                            print(f"      [OK] Google Places API reviews: {signals.google_review_count}")
+
+                        # Store the Google Maps URL
+                        if 'url' in result:
+                            signals.sources_checked.append(f"google_places_api:{result['url']}")
+                        else:
+                            signals.sources_checked.append(f"google_places_api:{place_id}")
+
+                        # Extract sentiment from reviews if available
+                        if 'reviews' in result:
+                            reviews_text = ' '.join([r.get('text', '') for r in result['reviews']])
+                            self._extract_sentiment_keywords(reviews_text, signals)
+
+                        return True
+
+            print(f"      [WARNING] Google Places API: No results found")
+            return False
+
+        except Exception as e:
+            print(f"      [WARNING] Google Places API error: {str(e)[:100]}")
+            signals.collection_errors.append(f"Google Places API: {str(e)[:50]}")
+            return False
+
     def _check_google_business(self, seed: AgentSeed, signals: WebSignals) -> None:
         """
         Check Google Business presence.
-        
-        Note: Google Places API should be used in production for accurate data.
-        This attempts to extract data from the Google Business Profile URL if available.
+
+        Primary method: Google Places API (reliable, no CAPTCHA)
+        Fallback: Web scraping with BeautifulSoup and improved regex patterns.
         """
+        # Try Google Places API first (most reliable)
+        if self.gmaps_client:
+            api_success = self._check_google_with_places_api(seed, signals)
+            if api_success:
+                print(f"      [OK] Google data retrieved via Places API")
+                return
+
+        # Fallback to web scraping if API is not available or failed
         if not self.session:
             return
-        
+
         # If we have a Google Business URL from the seed, try to extract data from it
         google_url = seed.google_business_url
         if google_url and google_url.strip():
             if not google_url.startswith('http'):
                 google_url = 'https://' + google_url
+
+            # Handle Google share links (e.g., https://share.google/xyz or g.page links)
+            # These need to be followed to get the actual Maps URL or Search Knowledge Panel
+            is_google_search = False
+            if 'share.google' in google_url or 'g.page' in google_url:
+                print(f"      Google share link detected, following redirect...")
+                try:
+                    # Follow redirects to get the actual Google Maps URL
+                    redirect_response = self.session.get(google_url, timeout=self.timeout, allow_redirects=True)
+                    if redirect_response.status_code == 200:
+                        google_url = redirect_response.url
+                        print(f"      Resolved to: {google_url[:80]}...")
+                        # Check if it's a Google Search result with Knowledge Panel
+                        if '/search?' in google_url and 'kgmid=' in google_url:
+                            is_google_search = True
+                            print(f"      Detected Google Search Knowledge Panel")
+                except requests.exceptions.RequestException as e:
+                    signals.collection_errors.append(f"Google redirect error: {str(e)[:50]}")
+                    signals.sources_checked.append(f"google_business:redirect_failed")
+                    return
+
             signals.sources_checked.append(f"google_business:{google_url}")
             try:
                 response = self.session.get(google_url, timeout=self.timeout, allow_redirects=True)
                 print(f"      Google response: {response.status_code}, length: {len(response.text)}")
                 if response.status_code == 200:
                     text = response.text
-                    
-                    # Try to extract review count - comprehensive patterns
-                    review_patterns = [
-                        r'"reviewCount"\s*:\s*(\d+)',
-                        r'"userRatingsTotal"\s*:\s*(\d+)',
-                        r'"review_count"\s*:\s*(\d+)',
-                        r'(\d+)\s*reviews?',
-                        r'>(\d+)\s*Reviews?<',
-                        r'Reviews\s*\((\d+)\)',
-                    ]
-                    for pattern in review_patterns:
-                        review_match = re.search(pattern, text, re.IGNORECASE)
-                        if review_match:
-                            count = int(review_match.group(1))
-                            if count > 0 and count < 10000:
-                                signals.google_review_count = count
-                                print(f"      ✓ Google reviews found: {count}")
-                                break
-                    
-                    # Try to extract rating - comprehensive patterns
-                    rating_patterns = [
-                        r'"rating"\s*:\s*(\d+\.?\d*)',
-                        r'"ratingValue"\s*:\s*(\d+\.?\d*)',
-                        r'"avgRating"\s*:\s*(\d+\.?\d*)',
-                        r'(\d+\.?\d*)\s*stars?',
-                        r'>(\d+\.?\d*)\s*★',
-                    ]
-                    for pattern in rating_patterns:
-                        rating_match = re.search(pattern, text, re.IGNORECASE)
-                        if rating_match:
-                            rating = float(rating_match.group(1))
-                            if 0 < rating <= 5:
-                                signals.google_rating = rating
-                                print(f"      ✓ Google rating found: {rating}")
-                                break
-                    
+
+                    # Special handling for Google Search Knowledge Panel
+                    if is_google_search:
+                        # Extract kgmid from URL for potential future use
+                        kgmid_match = re.search(r'kgmid=([^&]+)', google_url)
+                        if kgmid_match:
+                            kgmid = kgmid_match.group(1)
+                            print(f"      Knowledge Graph ID: {kgmid}")
+
+                        # Google Search embeds business data in JavaScript vars or data attributes
+                        # Look for knowledge panel data in various formats
+
+                        # Try to find rating and review data in the page
+                        # Pattern 1: Look for "X reviews" or "X.X ★"
+                        knowledge_panel_patterns = [
+                            (r'(\d+\.?\d*)\s*★[^<]*(\d+)\s*(?:Google\s+)?reviews?', 'rating_and_count'),
+                            (r'(\d+)\s*(?:Google\s+)?reviews?\s*[^<]*(\d+\.?\d*)\s*★', 'count_and_rating'),
+                            (r'(\d+)\s*(?:review|avalia)', 'count_only'),  # Multi-language
+                        ]
+
+                        for pattern, pattern_type in knowledge_panel_patterns:
+                            match = re.search(pattern, text, re.IGNORECASE)
+                            if match:
+                                if pattern_type == 'rating_and_count':
+                                    signals.google_rating = float(match.group(1))
+                                    signals.google_review_count = int(match.group(2))
+                                    print(f"      [OK] Knowledge Panel: {signals.google_rating}★, {signals.google_review_count} reviews")
+                                    break
+                                elif pattern_type == 'count_and_rating':
+                                    signals.google_review_count = int(match.group(1))
+                                    signals.google_rating = float(match.group(2))
+                                    print(f"      [OK] Knowledge Panel: {signals.google_review_count} reviews, {signals.google_rating}★")
+                                    break
+                                elif pattern_type == 'count_only':
+                                    signals.google_review_count = int(match.group(1))
+                                    print(f"      [OK] Knowledge Panel: {signals.google_review_count} reviews")
+
+                    # First, try to extract JSON-LD structured data (most reliable)
+                    if BS4_AVAILABLE:
+                        soup = BeautifulSoup(text, 'html.parser')
+
+                        # Look for JSON-LD structured data
+                        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+                        for script in json_ld_scripts:
+                            try:
+                                data = json.loads(script.string)
+                                # Handle both single objects and arrays
+                                if isinstance(data, list):
+                                    for item in data:
+                                        if self._extract_from_json_ld(item, signals):
+                                            print(f"      [OK] Google data extracted from JSON-LD")
+                                            break
+                                else:
+                                    if self._extract_from_json_ld(data, signals):
+                                        print(f"      [OK] Google data extracted from JSON-LD")
+                            except json.JSONDecodeError:
+                                continue
+
+                        # Extract from meta tags if not found in JSON-LD
+                        if signals.google_review_count == 0:
+                            meta_tags = soup.find_all('meta')
+                            for meta in meta_tags:
+                                # Check for rating in meta tags
+                                if meta.get('itemprop') == 'ratingValue':
+                                    try:
+                                        rating = float(meta.get('content', 0))
+                                        if 0 < rating <= 5:
+                                            signals.google_rating = rating
+                                            print(f"      [OK] Google rating from meta: {rating}")
+                                    except ValueError:
+                                        pass
+                                # Check for review count in meta tags
+                                if meta.get('itemprop') == 'reviewCount' or meta.get('itemprop') == 'ratingCount':
+                                    try:
+                                        count = int(meta.get('content', 0))
+                                        if count > 0:
+                                            signals.google_review_count = count
+                                            print(f"      [OK] Google reviews from meta: {count}")
+                                    except ValueError:
+                                        pass
+
+                        # Extract review data from visible text elements
+                        if signals.google_review_count == 0:
+                            # Look for aria-labels containing review counts
+                            for elem in soup.find_all(attrs={"aria-label": True}):
+                                label = elem.get('aria-label', '')
+                                # Pattern: "4.5 stars 123 reviews"
+                                review_match = re.search(r'(\d+)\s*reviews?', label, re.IGNORECASE)
+                                if review_match:
+                                    count = int(review_match.group(1))
+                                    if count > 0 and count < 50000:
+                                        signals.google_review_count = count
+                                        print(f"      [OK] Google reviews from aria-label: {count}")
+                                # Extract rating from same label
+                                rating_match = re.search(r'(\d+\.?\d*)\s*stars?', label, re.IGNORECASE)
+                                if rating_match:
+                                    rating = float(rating_match.group(1))
+                                    if 0 < rating <= 5:
+                                        signals.google_rating = rating
+                                        print(f"      [OK] Google rating from aria-label: {rating}")
+
+                    # Extract from embedded Google Maps data (window.APP_INITIALIZATION_STATE or similar)
+                    if signals.google_review_count == 0:
+                        # Google Maps embeds data in JavaScript objects
+                        app_init_match = re.search(r'window\.APP_INITIALIZATION_STATE\s*=\s*(\[\[.*?\]\]);', text, re.DOTALL)
+                        if app_init_match:
+                            try:
+                                # Try to extract review count from the embedded data structure
+                                embedded_data = app_init_match.group(1)
+                                # Look for patterns like [null,null,NUM,NUM] where first NUM is review count
+                                review_array_match = re.search(r'\[null,null,(\d+),\d+\]', embedded_data)
+                                if review_array_match:
+                                    count = int(review_array_match.group(1))
+                                    if count > 0 and count < 50000:
+                                        signals.google_review_count = count
+                                        print(f"      [OK] Google reviews from embedded data: {count}")
+                            except Exception:
+                                pass
+
+                    # Fallback: comprehensive regex patterns (for when BeautifulSoup isn't available or misses data)
+                    if signals.google_review_count == 0:
+                        review_patterns = [
+                            r'"reviewCount"\s*:\s*(\d+)',
+                            r'"userRatingsTotal"\s*:\s*(\d+)',
+                            r'"review_count"\s*:\s*(\d+)',
+                            r'\[null,null,(\d+),\d+\]',  # Google Maps data array pattern
+                            r'(\d+,\d+)\s*(?:Google\s*)?reviews?',  # Handles "1,234 reviews"
+                            r'(\d+)\s*Google\s*reviews?',
+                            r'(\d+)\s*reviews?\s*on\s*Google',
+                            r'>(\d+)\s*reviews?<',
+                            r'aria-label="[^"]*?(\d[\d,]*)\s*reviews?"',  # Handles comma-separated numbers
+                            r'Reviews\s*\((\d[\d,]*)\)',
+                            r'(\d+)\s*reviews?\s*</span>',
+                            r'</span>\s*(\d+)\s*reviews?',
+                            r'reviews["\s:]+(\d+)',
+                            r'data-review-count[="\s:]+(\d+)',
+                            r'\\"ludocid\\":\\"(\d+)\\".*?\\"userRatingCount\\":\\"(\d+)\\"',  # Extract 2nd group
+                            # Additional Google Maps specific patterns
+                            r'"2":\s*\[\s*null,\s*(\d+\.?\d*),\s*(\d+)',  # Maps data structure [null, rating, count]
+                            r'(\d+)\s*(?:avis|reviews?)\s*Google',  # Multi-language support
+                        ]
+                        for pattern in review_patterns:
+                            review_match = re.search(pattern, text, re.IGNORECASE)
+                            if review_match:
+                                # Some patterns have 2 groups, we want the last one
+                                groups = review_match.groups()
+                                count_str = groups[-1]  # Last group
+                                try:
+                                    # Remove commas if present (e.g., "1,234" -> "1234")
+                                    count_str = count_str.replace(',', '')
+                                    count = int(count_str)
+                                    if count > 0 and count < 50000:
+                                        signals.google_review_count = count
+                                        print(f"      [OK] Google reviews found via regex: {count}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Extract rating if not found yet
+                    if signals.google_rating == 0:
+                        rating_patterns = [
+                            r'"rating"\s*:\s*(\d+\.?\d*)',
+                            r'"ratingValue"\s*:\s*(\d+\.?\d*)',
+                            r'"avgRating"\s*:\s*(\d+\.?\d*)',
+                            r'"aggregateRating"[^}]*?"ratingValue"\s*:\s*"?(\d+\.?\d*)"?',
+                            r'\[null,(\d+\.?\d*),\d+,\d+\]',  # Google Maps rating array
+                            r'(\d+\.?\d*)\s*stars?',
+                            r'>(\d+\.?\d*)\s*★',
+                            r'★\s*(\d+\.?\d*)',
+                            r'data-rating[="\s:]+(\d+\.?\d*)',
+                        ]
+                        for pattern in rating_patterns:
+                            rating_match = re.search(pattern, text, re.IGNORECASE)
+                            if rating_match:
+                                try:
+                                    rating = float(rating_match.group(1))
+                                    if 0 < rating <= 5:
+                                        signals.google_rating = rating
+                                        print(f"      [OK] Google rating found via regex: {rating}")
+                                        break
+                                except (ValueError, IndexError):
+                                    continue
+
+                    # Extract actual review text for better sentiment analysis
+                    review_texts = []
+                    if BS4_AVAILABLE:
+                        try:
+                            soup = BeautifulSoup(text, 'html.parser')
+                            # Google Maps review text is often in specific containers
+                            # Look for review content in common selectors
+                            review_elements = soup.find_all(['span', 'div'], class_=re.compile(r'review.*text|comment|feedback', re.I))
+                            for elem in review_elements:
+                                review_text = elem.get_text(strip=True)
+                                if len(review_text) > 20:  # Minimum length to be a review
+                                    review_texts.append(review_text)
+
+                            # Also check data-review-text attributes
+                            for elem in soup.find_all(attrs={'data-review-text': True}):
+                                review_texts.append(elem.get('data-review-text'))
+                        except Exception:
+                            pass
+
+                    # Fallback: Extract review snippets from text using regex
+                    if not review_texts:
+                        # Look for quoted text that might be reviews
+                        quoted_patterns = [
+                            r'"review_text"\s*:\s*"([^"]{20,500})"',
+                            r'"text"\s*:\s*"([^"]{20,500})"',
+                            r'Review:\s*"([^"]{20,500})"',
+                        ]
+                        for pattern in quoted_patterns:
+                            matches = re.findall(pattern, text, re.IGNORECASE)
+                            review_texts.extend(matches[:10])  # Limit to 10 reviews
+
+                    # Extract sentiment from review texts if we found any
+                    if review_texts:
+                        combined_reviews = ' '.join(review_texts[:20])  # Use up to 20 reviews
+                        self._extract_sentiment_keywords(combined_reviews, signals)
+                        print(f"      [OK] Extracted sentiment from {len(review_texts)} review texts")
+                    else:
+                        # Fallback to full page text
+                        self._extract_sentiment_keywords(text, signals)
+
                     # Extract years of experience from Google Business if not found yet
                     if signals.years_experience == 0:
                         experience_patterns = [
@@ -822,14 +1338,21 @@ class WebSignalLayer:
                                 exp_val = int(exp_match.group(1))
                                 # Handle "since YYYY" format
                                 if exp_val > 1900:
-                                    from datetime import datetime
                                     exp = datetime.now().year - exp_val
                                 else:
                                     exp = exp_val
                                 if 0 < exp < 60:  # Reasonable range
                                     signals.years_experience = exp
-                                    print(f"      ✓ Google Business years experience found: {exp}")
+                                    print(f"      [OK] Google Business years experience found: {exp}")
                                     break
+
+                    if signals.google_review_count == 0:
+                        if is_google_search:
+                            print(f"      [WARNING] Google share links redirect to search pages without review data")
+                            print(f"      [INFO] Recommendation: Use direct Google Maps URLs or Google Places API")
+                            signals.collection_errors.append("Google share link - no review data (use Maps URL instead)")
+                        else:
+                            print(f"      [WARNING] Google reviews not extracted - page may require JavaScript")
                 else:
                     signals.collection_errors.append(f"Google returned status {response.status_code}")
             except requests.exceptions.RequestException as e:
@@ -837,6 +1360,248 @@ class WebSignalLayer:
         else:
             # Fallback: mark as checked but no URL available
             signals.sources_checked.append(f"google_business:no_url_provided")
+
+    def _extract_from_json_ld(self, data: dict, signals: WebSignals) -> bool:
+        """Extract review data from JSON-LD structured data (for Google). Returns True if data found."""
+        found = False
+
+        # Check if this is a LocalBusiness or related schema
+        schema_type = data.get('@type', '')
+        if isinstance(schema_type, str):
+            schema_type = [schema_type]
+
+        relevant_types = ['LocalBusiness', 'RealEstateAgent', 'Organization', 'Person', 'ProfessionalService']
+        if any(t in schema_type for t in relevant_types):
+            # Extract aggregate rating
+            agg_rating = data.get('aggregateRating', {})
+            if agg_rating:
+                rating_val = agg_rating.get('ratingValue', 0)
+                review_count = agg_rating.get('reviewCount', 0) or agg_rating.get('ratingCount', 0)
+
+                if rating_val:
+                    try:
+                        signals.google_rating = float(rating_val)
+                        found = True
+                    except (ValueError, TypeError):
+                        pass
+
+                if review_count:
+                    try:
+                        signals.google_review_count = int(review_count)
+                        found = True
+                    except (ValueError, TypeError):
+                        pass
+
+            # Extract from reviews array if present
+            reviews = data.get('review', [])
+            if reviews and isinstance(reviews, list):
+                if signals.google_review_count == 0:
+                    signals.google_review_count = len(reviews)
+                    found = True
+
+        return found
+
+    def _extract_zillow_from_json_ld(self, data: dict, signals: WebSignals) -> bool:
+        """Extract Zillow review data from JSON-LD structured data. Returns True if data found."""
+        found = False
+
+        schema_type = data.get('@type', '')
+        if isinstance(schema_type, str):
+            schema_type = [schema_type]
+
+        relevant_types = ['RealEstateAgent', 'Person', 'LocalBusiness', 'ProfessionalService']
+        if any(t in schema_type for t in relevant_types):
+            # Extract aggregate rating
+            agg_rating = data.get('aggregateRating', {})
+            if agg_rating:
+                rating_val = agg_rating.get('ratingValue', 0)
+                review_count = agg_rating.get('reviewCount', 0) or agg_rating.get('ratingCount', 0)
+
+                if rating_val and signals.zillow_rating == 0:
+                    try:
+                        signals.zillow_rating = float(rating_val)
+                        found = True
+                    except (ValueError, TypeError):
+                        pass
+
+                if review_count and signals.zillow_review_count == 0:
+                    try:
+                        signals.zillow_review_count = int(review_count)
+                        found = True
+                    except (ValueError, TypeError):
+                        pass
+
+            # Extract from reviews array
+            reviews = data.get('review', [])
+            if reviews and isinstance(reviews, list) and signals.zillow_review_count == 0:
+                signals.zillow_review_count = len(reviews)
+                found = True
+
+        return found
+    
+    def _extract_sentiment_keywords(self, text: str, signals: WebSignals) -> None:
+        """
+        Extract sentiment keywords from review text using improved contextual analysis.
+
+        Uses word boundary matching to avoid false positives and extracts keywords
+        from actual review content areas (avoiding nav menus, headers, etc).
+        """
+        text_lower = text.lower()
+
+        # Try to isolate review content if using BeautifulSoup
+        review_sections = []
+        if BS4_AVAILABLE:
+            try:
+                soup = BeautifulSoup(text, 'html.parser')
+
+                # Look for common review section selectors
+                review_containers = soup.find_all(['div', 'section', 'article'],
+                    class_=re.compile(r'review|testimonial|feedback', re.I))
+
+                # Also check for elements with review-related IDs or data attributes
+                review_containers.extend(soup.find_all(attrs={
+                    'id': re.compile(r'review|testimonial', re.I),
+                    'data-testid': re.compile(r'review|testimonial', re.I)
+                }))
+
+                # Extract text from review containers
+                for container in review_containers:
+                    review_sections.append(container.get_text().lower())
+
+                # If we found dedicated review sections, use those; otherwise use full text
+                if review_sections:
+                    text_lower = ' '.join(review_sections)
+            except:
+                # If BeautifulSoup processing fails, fall back to full text
+                pass
+
+        # Enhanced sentiment keywords with word boundary patterns
+        sentiment_map = {
+            'responsive': [
+                r'\bresponsive\b', r'\bquick(?:ly)?\s+(?:to\s+)?respond', r'\bfast\s+response\b',
+                r'\bprompt(?:ly)?\b', r'\btimely\b', r'\bquick\s+communication\b'
+            ],
+            'helpful': [
+                r'\bhelpful\b', r'\bhelped\s+(?:us|me)\b', r'\bgreat\s+help\b',
+                r'\bvery\s+helpful\b', r'\bincredibly\s+helpful\b', r'\bso\s+helpful\b'
+            ],
+            'expert': [
+                r'\bexpert\b', r'\bexpertise\b', r'\bmarket\s+expert\b',
+                r'\bspecialist\b', r'\bskilled\b', r'\bexperienced\b'
+            ],
+            'professional': [
+                r'\bprofessional(?:ism)?\b', r'\bprofessionally\b',
+                r'\btop\s+(?:notch|tier)\b'
+            ],
+            'knowledgeable': [
+                r'\bknowledgeable\b', r'\bknowledge(?:able)?\b', r'\binformed\b',
+                r'\bwell[- ]versed\b', r'\bwell[- ]informed\b', r'\bsavvy\b'
+            ],
+            'patient': [
+                r'\bpatien(?:t|ce)\b', r'\btook\s+(?:the\s+)?time\b',
+                r'\bnever\s+rushed\b', r'\bnot\s+pushy\b', r'\bunderstanding\b'
+            ],
+            'friendly': [
+                r'\bfriendly\b', r'\bpersonable\b', r'\bwarm\b',
+                r'\bapproachable\b', r'\beasy\s+to\s+(?:talk|work)\b', r'\bnice\b'
+            ],
+            'trustworthy': [
+                r'\btrustwor(?:thy|thiness)\b', r'\btrust(?:ed)?\b', r'\bhonest(?:y)?\b',
+                r'\bintegrity\b', r'\breliable\b', r'\bdependable\b', r'\btruthful\b'
+            ],
+            'communicative': [
+                r'\bcommunicati(?:ve|on)\b', r'\bkept\s+(?:us|me)\s+informed\b',
+                r'\bgreat\s+communicator\b', r'\bregular\s+updates?\b',
+                r'\bstayed\s+in\s+touch\b', r'\bresponsive\s+communication\b'
+            ],
+            'dedicated': [
+                r'\bdedicat(?:ed|ion)\b', r'\bcommitted\b',
+                r'\bwent\s+(?:the\s+)?(?:extra|above)\b', r'\bextra\s+mile\b',
+                r'\bhard[- ]working\b', r'\bdiligent\b'
+            ]
+        }
+
+        # Count occurrences using regex word boundaries (more accurate than simple counting)
+        for keyword, patterns in sentiment_map.items():
+            count = 0
+            for pattern in patterns:
+                # Use regex to find whole word matches
+                matches = re.findall(pattern, text_lower, re.IGNORECASE)
+                count += len(matches)
+
+            # Cap the count at a reasonable maximum per source to avoid skewing from repeated keywords
+            # in non-review content (e.g., website copy mentioning "professional" many times)
+            max_per_source = 20
+            count = min(count, max_per_source)
+
+            # Add to existing count (accumulates across sources)
+            signals.sentiment_keywords[keyword] += count
+    
+    def _populate_entity_verification(self, seed: AgentSeed, signals: WebSignals) -> None:
+        """Populate entity verification data for Identity Ledger.
+        Data is considered verified if present in Excel database (seed)."""
+        
+        # Canonical Name - verified if we have it in database
+        if seed.full_name:
+            platform = 'google' if seed.google_business_url else ('zillow' if seed.zillow_url else 'database')
+            signals.entity_verification['canonical_name'] = {
+                'value': seed.full_name,
+                'platform': platform,
+                'verified': True  # Present in Excel = verified
+            }
+        else:
+            signals.entity_verification['canonical_name'] = {
+                'value': '',
+                'platform': '',
+                'verified': False
+            }
+        
+        # Primary Role - verified if agent exists in database
+        signals.entity_verification['primary_role'] = {
+            'value': 'Real Estate Agent',
+            'platform': 'database',
+            'verified': True  # If they're in database, role is verified
+        }
+        
+        # Brokerage Anchor - use website URL if available, else brokerage name
+        if seed.website_url:
+            signals.entity_verification['brokerage_anchor'] = {
+                'value': seed.website_url,
+                'platform': 'website',
+                'verified': True  # Website URL present = verified
+            }
+        elif hasattr(seed, 'brokerage_name') and seed.brokerage_name:
+            signals.entity_verification['brokerage_anchor'] = {
+                'value': seed.brokerage_name,
+                'platform': 'database',
+                'verified': True  # Present in Excel = verified
+            }
+        elif signals.brokerage_name:
+            signals.entity_verification['brokerage_anchor'] = {
+                'value': signals.brokerage_name,
+                'platform': 'website',
+                'verified': True
+            }
+        else:
+            signals.entity_verification['brokerage_anchor'] = {
+                'value': '',
+                'platform': '',
+                'verified': False
+            }
+        
+        # License Node - verified if license/agent ID present in database
+        if seed.license_number or seed.agent_id:
+            signals.entity_verification['license_node'] = {
+                'value': seed.license_number or seed.agent_id,
+                'platform': 'database',
+                'verified': True  # Present in Excel = verified
+            }
+        else:
+            signals.entity_verification['license_node'] = {
+                'value': '',
+                'platform': '',
+                'verified': False
+            }
     
     def _calculate_verified_totals(self, signals: WebSignals) -> None:
         """Calculate aggregate totals from verified sources only."""
@@ -1618,7 +2383,7 @@ class AIAnalyzer:
                 self.active_llm = 'openai'
                 print("✅ OpenAI client initialized")
             except Exception as e:
-                print(f"⚠️ OpenAI init failed: {e}")
+                print(f"[WARNING] OpenAI init failed: {e}")
         
         # Fallback to Gemini
         if not self.openai_client and gemini_api_key and GEMINI_AVAILABLE:
@@ -1628,10 +2393,10 @@ class AIAnalyzer:
                 self.active_llm = 'gemini'
                 print("✅ Gemini client initialized")
             except Exception as e:
-                print(f"⚠️ Gemini init failed: {e}")
+                print(f"[WARNING] Gemini init failed: {e}")
         
         if not self.active_llm:
-            print("⚠️ No LLM available - using algorithmic scoring only")
+            print("[WARNING] No LLM available - using algorithmic scoring only")
     
     def analyze_agent(self, profile: AgentProfile, leaderboard: Optional[Dict] = None) -> Dict:
         """
@@ -1654,10 +2419,10 @@ class AIAnalyzer:
         # STEP 2: Collect web signals (SOURCE OF TRUTH)
         print(f"🌐 Collecting web signals for {seed.full_name}...")
         web_signals = self.web_signal_layer.collect_signals(seed)
-        print(f"   ✓ Sources checked: {len(web_signals.sources_checked)}")
-        print(f"   ✓ Verified reviews: {web_signals.total_verified_reviews}")
+        print(f"   [OK] Sources checked: {len(web_signals.sources_checked)}")
+        print(f"   [OK] Verified reviews: {web_signals.total_verified_reviews}")
         if web_signals.collection_errors:
-            print(f"   ⚠️ Collection issues: {len(web_signals.collection_errors)}")
+            print(f"   [WARNING] Collection issues: {len(web_signals.collection_errors)}")
         
         # STEP 2.5: FALLBACK - Use profile data if web scraping didn't get reviews
         # This compensates for anti-bot protections on Zillow, Realtor.com, etc.
@@ -1717,7 +2482,15 @@ class AIAnalyzer:
                         if key in llm_insights and llm_insights[key]:
                             analysis[key] = llm_insights[key]
             except Exception as e:
-                print(f"⚠️ LLM enhancement failed (using base analysis): {e}")
+                print(f"[WARNING] LLM enhancement failed (using base analysis): {e}")
+        
+        # STEP 6: Generate AI Gap Analysis
+        try:
+            ai_gaps = self.generate_ai_gap_analysis(seed, web_signals, analysis.get('scores', {}))
+            analysis['ai_gap_analysis'] = ai_gaps
+        except Exception as e:
+            print(f"[WARNING] AI gap analysis failed: {e}")
+            analysis['ai_gap_analysis'] = []
         
         return analysis
     
@@ -1805,16 +2578,30 @@ class AIAnalyzer:
         else:
             exec_sum += "Additional verification recommended before engagement."
         
-        # Build key links from verified accessible platforms
+        # Build key links from all available platform URLs
         links = {}
-        if signals.website_accessible and seed.website_url:
+        # Website and social media
+        if seed.website_url:
             links['website'] = seed.website_url
-        if signals.linkedin_accessible and seed.linkedin_url:
+        if seed.linkedin_url:
             links['linkedin'] = seed.linkedin_url
-        if signals.instagram_accessible and seed.instagram_url:
+        if seed.instagram_url:
             links['instagram'] = seed.instagram_url
-        if signals.facebook_accessible and seed.facebook_url:
+        if seed.facebook_url:
             links['facebook'] = seed.facebook_url
+        if seed.youtube_url:
+            links['youtube'] = seed.youtube_url
+        if seed.twitter_url:
+            links['twitter'] = seed.twitter_url
+        # Marketplace profiles
+        if seed.zillow_url:
+            links['zillow'] = seed.zillow_url
+        if seed.realtor_url:
+            links['realtor'] = seed.realtor_url
+        if seed.homes_url:
+            links['homes'] = seed.homes_url
+        if seed.google_business_url:
+            links['google'] = seed.google_business_url
         
         return {
             "scores": {
@@ -1825,6 +2612,7 @@ class AIAnalyzer:
                 "overall": {"score": overall, "grade": grade, "tier": tier}
             },
             "llm_visibility_scores": llm_scores,
+            "ai_trust_index": self._calculate_ai_trust_index(overall, signals, llm_scores),
             "web_signals_summary": {
                 "sources_checked": len(signals.sources_checked),
                 "sources_list": signals.sources_checked,  # Full list of URLs checked
@@ -1854,7 +2642,11 @@ class AIAnalyzer:
                 "listings": {
                     "active": signals.active_listing_count,
                     "sold": signals.sold_listing_count
-                }
+                },
+                # Sentiment keywords extracted from reviews
+                "sentiment_keywords": signals.sentiment_keywords,
+                # Entity verification for Identity Ledger
+                "entity_verification": signals.entity_verification
             },
             "leaderboard": {
                 "national_percentile": f"Top {pct}%" if pct != 'N/A' else 'N/A',
@@ -2035,6 +2827,93 @@ class AIAnalyzer:
         
         return recs[:5]  # Top 5 recommendations
     
+    def _calculate_ai_trust_index(self, overall: int, signals: WebSignals, llm_scores: Dict) -> Dict:
+        """
+        Calculate AI Trust Index - a composite grade indicating how trustworthy
+        the agent appears to AI systems.
+        
+        Formula considers:
+        - Overall SALT score (40%)
+        - Average LLM visibility score (30%)
+        - Review quality signals (20%)
+        - Entity verification completeness (10%)
+        """
+        # Component 1: Overall SALT score (40%)
+        salt_component = overall * 0.40
+        
+        # Component 2: Average LLM visibility score (30%)
+        llm_avg = sum(llm_scores.values()) / len(llm_scores) if llm_scores else 0
+        llm_component = llm_avg * 0.30
+        
+        # Component 3: Review quality signals (20%)
+        review_score = 0
+        if signals.total_verified_reviews >= 100:
+            review_score = 100
+        elif signals.total_verified_reviews >= 50:
+            review_score = 80
+        elif signals.total_verified_reviews >= 20:
+            review_score = 60
+        elif signals.total_verified_reviews >= 5:
+            review_score = 40
+        elif signals.total_verified_reviews > 0:
+            review_score = 20
+        
+        # Add rating bonus
+        if signals.average_verified_rating >= 4.8:
+            review_score = min(100, review_score + 20)
+        elif signals.average_verified_rating >= 4.5:
+            review_score = min(100, review_score + 15)
+        elif signals.average_verified_rating >= 4.0:
+            review_score = min(100, review_score + 10)
+        
+        review_component = review_score * 0.20
+        
+        # Component 4: Entity verification completeness (10%)
+        verified_count = sum([
+            1 for v in signals.entity_verification.values()
+            if v.get('verified', False)
+        ])
+        entity_score = (verified_count / 4) * 100  # 4 possible verifications
+        entity_component = entity_score * 0.10
+        
+        # Calculate total score
+        total_score = int(salt_component + llm_component + review_component + entity_component)
+        
+        # Convert to letter grade (generous grading curve)
+        if total_score >= 85:
+            grade = "A+"
+        elif total_score >= 78:
+            grade = "A"
+        elif total_score >= 72:
+            grade = "A-"
+        elif total_score >= 65:
+            grade = "B+"
+        elif total_score >= 58:
+            grade = "B"
+        elif total_score >= 52:
+            grade = "B-"
+        elif total_score >= 45:
+            grade = "C+"
+        elif total_score >= 38:
+            grade = "C"
+        elif total_score >= 32:
+            grade = "C-"
+        elif total_score >= 25:
+            grade = "D"
+        else:
+            grade = "F"
+        
+        return {
+            "score": total_score,
+            "grade": grade,
+            "components": {
+                "salt_score": round(salt_component, 1),
+                "llm_visibility": round(llm_component, 1),
+                "review_quality": round(review_component, 1),
+                "entity_verification": round(entity_component, 1)
+            }
+        }
+    
     def _get_llm_insights(self, seed: AgentSeed, signals: WebSignals, 
                           base_analysis: Dict, leaderboard: Optional[Dict]) -> Optional[Dict]:
         """
@@ -2123,7 +3002,172 @@ Return ONLY valid JSON, no markdown."""
             
             return json.loads(text.strip())
         except Exception as e:
-            print(f"⚠️ LLM insights error: {e}")
+            print(f"[WARNING] LLM insights error: {e}")
+            return None
+    
+    def generate_ai_gap_analysis(self, seed: AgentSeed, signals: WebSignals, scores: Dict) -> List[Dict]:
+        """
+        Generate AI Gap Analysis using LLM based on agent's data gaps.
+        
+        Returns a list of gaps with status (gap/verified) and descriptions.
+        """
+        # First, build static gap analysis based on signals
+        gaps = []
+        
+        # Check for neighborhood/market coverage
+        if signals.google_review_count == 0 and signals.google_rating == 0:
+            gaps.append({
+                "status": "gap",
+                "title": f"Missing {seed.city} Neighborhoods",
+                "description": "AI models unaware of sub-market expertise"
+            })
+        
+        # Check for video content
+        if not signals.website_has_listings:
+            gaps.append({
+                "status": "gap",
+                "title": "Lack of Video Citations",
+                "description": "No YouTube data surfacing in Perplexity"
+            })
+        
+        # Check entity consistency
+        verified_entities = sum([1 for v in signals.entity_verification.values() if v.get('verified', False)])
+        if verified_entities >= 3:
+            gaps.append({
+                "status": "verified",
+                "title": "Entity Consistency Found",
+                "description": "GMB and Zillow names match perfectly"
+            })
+        else:
+            gaps.append({
+                "status": "gap",
+                "title": "Entity Inconsistency Detected",
+                "description": "Name variations across platforms reduce AI confidence"
+            })
+        
+        # Check service area mapping
+        if signals.address_verified or (seed.city and seed.state):
+            gaps.append({
+                "status": "verified",
+                "title": "Service Area Mapped",
+                "description": "Radius coverage verified via Google Maps"
+            })
+        else:
+            gaps.append({
+                "status": "gap",
+                "title": "Service Area Undefined",
+                "description": "No clear geographic coverage for AI to reference"
+            })
+        
+        # Check for reviews
+        if signals.total_verified_reviews < 20:
+            gaps.append({
+                "status": "gap",
+                "title": "Insufficient Review Volume",
+                "description": f"Only {signals.total_verified_reviews} reviews, need 20+ for strong AI visibility"
+            })
+        elif signals.total_verified_reviews >= 50:
+            gaps.append({
+                "status": "verified",
+                "title": "Strong Review Presence",
+                "description": f"{signals.total_verified_reviews} reviews build trust signals"
+            })
+        
+        # Check social presence
+        platforms = sum([signals.linkedin_accessible, signals.instagram_accessible, 
+                        signals.facebook_accessible, signals.twitter_accessible])
+        if platforms < 2:
+            gaps.append({
+                "status": "gap",
+                "title": "Limited Social Footprint",
+                "description": "AI systems need multi-platform presence for verification"
+            })
+        
+        # Check website SSL
+        if signals.website_exists and not signals.website_has_ssl:
+            gaps.append({
+                "status": "gap", 
+                "title": "Website Security Issue",
+                "description": "Missing SSL certificate reduces trust score"
+            })
+        
+        # Use LLM for additional personalized gap analysis if available
+        if self.active_llm:
+            try:
+                llm_gaps = self._get_llm_gap_analysis(seed, signals, scores)
+                if llm_gaps:
+                    gaps.extend(llm_gaps)
+            except Exception as e:
+                print(f"[WARNING] LLM gap analysis error: {e}")
+        
+        return gaps[:8]  # Return top 8 gaps
+    
+    def _get_llm_gap_analysis(self, seed: AgentSeed, signals: WebSignals, scores: Dict) -> Optional[List[Dict]]:
+        """Get additional gap analysis from LLM."""
+        prompt = f"""Analyze this real estate agent's AI visibility gaps.
+
+AGENT: {seed.full_name} in {seed.city}, {seed.state}
+LICENSE: {seed.license_number or 'Unknown'}
+
+CURRENT SIGNALS:
+- Total Reviews: {signals.total_verified_reviews}
+- Average Rating: {signals.average_verified_rating:.1f}/5
+- Website Accessible: {signals.website_accessible}
+- Website Has SSL: {signals.website_has_ssl}
+- Social Platforms Verified: {sum([signals.linkedin_accessible, signals.instagram_accessible, signals.facebook_accessible, signals.twitter_accessible])}
+- Years Experience: {signals.years_experience}
+- Brokerage Verified: {signals.brokerage_verified}
+
+SALT SCORES:
+- Semantic: {scores.get('semantic', {}).get('score', 0)}/100
+- Authority: {scores.get('authority', {}).get('score', 0)}/100
+- Location: {scores.get('location', {}).get('score', 0)}/100
+- Trust: {scores.get('trust', {}).get('score', 0)}/100
+
+Identify 2-3 specific, actionable gaps that would improve this agent's AI visibility.
+Focus on gaps specific to their market ({seed.city}) and current weaknesses.
+
+Return JSON array ONLY:
+[
+  {{"status": "gap", "title": "Short title", "description": "Brief explanation"}},
+  {{"status": "gap", "title": "Short title", "description": "Brief explanation"}}
+]
+
+Return ONLY valid JSON array, no markdown."""
+
+        try:
+            if self.active_llm == 'openai' and self.openai_client:
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=LLM_TEMPERATURE,
+                    max_tokens=500
+                )
+                content = response.choices[0].message.content
+                text = content.strip() if content else ""
+            elif self.active_llm == 'gemini' and self.gemini_model:
+                response = self.gemini_model.generate_content(
+                    prompt,
+                    generation_config={"temperature": LLM_TEMPERATURE, "max_output_tokens": 500}
+                )
+                text = response.text.strip() if response.text else ""
+            else:
+                return None
+            
+            if not text:
+                return None
+            
+            # Clean response
+            if text.startswith('```json'):
+                text = text[7:]
+            if text.startswith('```'):
+                text = text[3:]
+            if text.endswith('```'):
+                text = text[:-3]
+            
+            return json.loads(text.strip())
+        except Exception as e:
+            print(f"[WARNING] LLM gap analysis error: {e}")
             return None
     
     # ===================================================================================
@@ -2208,7 +3252,7 @@ class AgentDatabase:
                     break
             else:
                 # No matching column found - create empty column
-                print(f"   ⚠️  No column found for '{expected_name}', creating empty")
+                print(f"   [WARNING]  No column found for '{expected_name}', creating empty")
                 self.df[expected_name] = ''
 
     def _build_search_cache(self):
@@ -2298,7 +3342,7 @@ class AgentDatabase:
                 # Try matching as string
                 agent = self.df[self.df['Agent_ID'].astype(str) == str(agent_id)]
             if agent.empty:
-                print(f"⚠️ No agent found with ID: {agent_id}")
+                print(f"[WARNING] No agent found with ID: {agent_id}")
                 return {}
             
             agent = agent.iloc[0]

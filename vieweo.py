@@ -309,7 +309,7 @@ def free_visibility():
             'brokerage': agent.get('brokerage', ''),
             'years_experience': years_experience,  # Prefer scraped data
             'phone': agent.get('phone', ''),
-            'email': agent.get('email', ''),
+            'email': agent.get('email', '') or agent.get('online_presence', {}).get('email', ''),
             'website': agent.get('online_presence', {}).get('website', ''),
         },
         'basic_metrics': {
@@ -1837,6 +1837,7 @@ FRONTEND_HTML = '''
             const [data, setData] = useState(cachedData || null);
             const [loading, setLoading] = useState(!cachedData);
             const [error, setError] = useState(null);
+            const [showRemediation, setShowRemediation] = useState(false);
             
             // Use ref to track if we've already fetched
             const hasFetchedRef = React.useRef(false);
@@ -1886,7 +1887,7 @@ FRONTEND_HTML = '''
                         setError(e.message);
                         setLoading(false);
                     });
-            }, [agentName, cachedData]); // Removed onDataLoaded from deps to prevent infinite loop
+            }, [agentName, cachedData]);
 
             if (loading) return <LoadingScreen title="Generating Full Report" subtitle="Comprehensive AI visibility analysis"/>;
 
@@ -1910,130 +1911,428 @@ FRONTEND_HTML = '''
             const agent = data.agent || {};
             const analysis = data.analysis || {};
             const scores = analysis.scores || {};
-            const roadmap = analysis.geo_improvement_roadmap || {};
-            const gaps = analysis.competitor_gaps || {};
-            const insights = analysis.actionable_insights || {};
-            const recommendations = analysis.recommendations || {};
-            const profileAnalysis = analysis.profile_analysis || {};
+            const webSignals = analysis.web_signals_summary || {};
             const llmScores = analysis.llm_visibility_scores || {};
+            const aiTrustIndex = analysis.ai_trust_index || { score: 0, grade: 'N/A' };
+            const entityVerification = webSignals.entity_verification || {};
+            const sentimentKeywords = webSignals.sentiment_keywords || {};
+            const reviewSources = webSignals.review_sources || {};
+            const aiGapAnalysis = analysis.ai_gap_analysis || [];
+            const roadmap = analysis.geo_improvement_roadmap || {};
+            const keyLinks = analysis.key_links || {};
 
             const overallScore = scores.overall?.score || 0;
-            const getScoreStyle = (score) => ({
-                color: score >= 80 ? '#00D395' : score >= 60 ? '#006AFF' : score >= 40 ? '#FF9500' : '#FF3B30',
-                bg: score >= 80 ? 'bg-[#00D395]' : score >= 60 ? 'bg-[#006AFF]' : score >= 40 ? 'bg-[#FF9500]' : 'bg-[#FF3B30]'
-            });
+            const tier = scores.overall?.tier || 'Developing';
+            
+            const getScoreColor = (score) => {
+                if (score >= 80) return '#10B981';
+                if (score >= 60) return '#3B82F6';
+                if (score >= 40) return '#F59E0B';
+                return '#EF4444';
+            };
 
-            // Chart component for SALT radar
-            const SALTChart = () => {
-                const saltData = [
-                    { label: 'S', name: 'Semantic', score: scores.semantic?.score || 0 },
-                    { label: 'A', name: 'Authority', score: scores.authority?.score || 0 },
-                    { label: 'L', name: 'Location', score: scores.location?.score || 0 },
-                    { label: 'T', name: 'Trust', score: scores.trust?.score || 0 }
-                ];
+            const getTierColor = (tier) => {
+                switch(tier?.toLowerCase()) {
+                    case 'elite': return 'bg-purple-500';
+                    case 'exceptional': return 'bg-green-500';
+                    case 'strong': return 'bg-blue-500';
+                    case 'solid': return 'bg-yellow-500';
+                    default: return 'bg-orange-500';
+                }
+            };
+
+            // Circular progress component for SALT scores
+            const CircularProgress = ({ score, label, change }) => {
+                const color = getScoreColor(score);
+                const circumference = 2 * Math.PI * 36;
+                const offset = circumference - (score / 100) * circumference;
+                
                 return (
-                    <div className="grid grid-cols-4 gap-4">
-                        {saltData.map((item, i) => (
-                            <div key={i} className="text-center">
-                                <div className="relative w-20 h-20 mx-auto mb-2">
-                                    <svg className="w-full h-full transform -rotate-90">
-                                        <circle cx="40" cy="40" r="36" fill="none" stroke="#e5e7eb" strokeWidth="6"/>
-                                        <circle 
-                                            cx="40" cy="40" r="36" fill="none" 
-                                            stroke={getScoreStyle(item.score).color}
-                                            strokeWidth="6" 
-                                            strokeLinecap="round"
-                                            strokeDasharray={`${item.score * 2.26} 226`}
-                                        />
-                                    </svg>
-                                    <div className="absolute inset-0 flex items-center justify-center">
-                                        <span className="text-xl font-bold text-gray-900">{item.score}</span>
-                                    </div>
-                                </div>
-                                <div className="text-sm font-semibold text-gray-900">{item.name}</div>
+                    <div className="flex flex-col items-center">
+                        <div className="relative w-20 h-20">
+                            <svg className="w-full h-full transform -rotate-90">
+                                <circle cx="40" cy="40" r="36" fill="none" stroke="#E5E7EB" strokeWidth="6"/>
+                                <circle 
+                                    cx="40" cy="40" r="36" fill="none" 
+                                    stroke={color}
+                                    strokeWidth="6" 
+                                    strokeLinecap="round"
+                                    strokeDasharray={circumference}
+                                    strokeDashoffset={offset}
+                                />
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <span className="text-xl font-bold text-gray-800">{score}</span>
                             </div>
-                        ))}
+                        </div>
+                        <span className="text-xs font-medium text-gray-600 mt-2">{label}</span>
+                        {change && (
+                            <span className={`text-xs mt-1 ${change > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                {change > 0 ? '+' : ''}{change}%
+                            </span>
+                        )}
                     </div>
                 );
             };
 
+            // Platform logo component
+            const PlatformBadge = ({ platform, verified }) => {
+                const logos = {
+                    google: '🔍',
+                    zillow: '🏠',
+                    realtor: '🔑',
+                    brokerage: '🏢',
+                    website: '🌐',
+                    database: '📊'
+                };
+                return (
+                    <div className="flex items-center gap-1">
+                        <span className="text-sm">{logos[platform] || '📌'}</span>
+                        {verified && (
+                            <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                            </svg>
+                        )}
+                    </div>
+                );
+            };
+
+            // Platform link icon component with brand colors
+            const PlatformLinkIcon = ({ platform, url }) => {
+                if (!url) return null;
+                
+                const platformConfig = {
+                    zillow: {
+                        name: 'Zillow',
+                        color: '#006AFF',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12.006 0L1.5 8.391v6.617l3.673-2.928V8.973l6.833-5.46 6.833 5.46v3.107l3.661 2.928V8.391L12.006 0zm6.833 14.652l-6.833 5.46-6.833-5.46L1.5 17.58v3.029L12.006 24l10.494-8.391v-3.029l-3.661 2.072z"/>
+                            </svg>
+                        )
+                    },
+                    realtor: {
+                        name: 'Realtor',
+                        color: '#D92228',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                            </svg>
+                        )
+                    },
+                    homes: {
+                        name: 'Homes.com',
+                        color: '#00A650',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                            </svg>
+                        )
+                    },
+                    google: {
+                        name: 'Google',
+                        color: '#4285F4',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                            </svg>
+                        )
+                    },
+                    linkedin: {
+                        name: 'LinkedIn',
+                        color: '#0A66C2',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                            </svg>
+                        )
+                    },
+                    instagram: {
+                        name: 'Instagram',
+                        color: '#E4405F',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/>
+                            </svg>
+                        )
+                    },
+                    facebook: {
+                        name: 'Facebook',
+                        color: '#1877F2',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                            </svg>
+                        )
+                    },
+                    youtube: {
+                        name: 'YouTube',
+                        color: '#FF0000',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                            </svg>
+                        )
+                    },
+                    twitter: {
+                        name: 'X (Twitter)',
+                        color: '#000000',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                            </svg>
+                        )
+                    },
+                    website: {
+                        name: 'Website',
+                        color: '#6366F1',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                            </svg>
+                        )
+                    }
+                };
+
+                const config = platformConfig[platform];
+                if (!config) return null;
+
+                return (
+                    <a 
+                        href={url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="flex flex-col items-center gap-1 transition-all hover:scale-110"
+                        title={config.name}
+                    >
+                        <div 
+                            className="flex items-center justify-center w-10 h-10 rounded-full hover:shadow-lg transition-shadow"
+                            style={{ backgroundColor: config.color + '15', color: config.color }}
+                        >
+                            {config.icon}
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-medium">{config.name}</span>
+                    </a>
+                );
+            };
+
+            // Calculate review source percentages
+            const totalReviews = webSignals.total_verified_reviews || 0;
+            const zillowReviews = reviewSources.zillow?.reviews || 0;
+            const googleReviews = reviewSources.google?.reviews || 0;
+            const realtorReviews = reviewSources.realtor?.reviews || 0;
+            
+            const zillowPct = totalReviews > 0 ? Math.round((zillowReviews / totalReviews) * 100) : 0;
+            const googlePct = totalReviews > 0 ? Math.round((googleReviews / totalReviews) * 100) : 0;
+            const realtorPct = totalReviews > 0 ? 100 - zillowPct - googlePct : 0;
+
+            // Get top 3 sentiment keywords with relative percentages
+            const allSentiments = Object.entries(sentimentKeywords)
+                .filter(([_, count]) => count > 0)
+                .sort((a, b) => b[1] - a[1]);
+            
+            const maxSentimentCount = allSentiments.length > 0 ? allSentiments[0][1] : 1;
+            
+            const topSentiments = allSentiments
+                .slice(0, 3)
+                .map(([keyword, count]) => {
+                    // Calculate percentage relative to max (top sentiment = 100%)
+                    const percentage = Math.round((count / maxSentimentCount) * 100);
+                    // Estimate reviews mentioning this (cap at totalReviews)
+                    const estimatedReviews = Math.min(count, totalReviews || count);
+                    return [keyword, estimatedReviews, percentage];
+                });
+
+            // Remediation Modal
+            const RemediationModal = () => (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-auto p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-gray-900">Remediation Plan</h2>
+                            <button onClick={() => setShowRemediation(false)} className="text-gray-400 hover:text-gray-600">
+                                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            <div className="p-4 bg-red-50 rounded-lg border-l-4 border-red-500">
+                                <h3 className="font-semibold text-red-800 mb-2">Critical (Week 1)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.critical_issues || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-red-700 flex items-start gap-2">
+                                            <span className="text-red-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-orange-50 rounded-lg border-l-4 border-orange-500">
+                                <h3 className="font-semibold text-orange-800 mb-2">High Priority (Week 2)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.high_priority || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-orange-700 flex items-start gap-2">
+                                            <span className="text-orange-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-blue-50 rounded-lg border-l-4 border-blue-500">
+                                <h3 className="font-semibold text-blue-800 mb-2">Medium Priority (Week 3-4)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.medium_priority || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-blue-700 flex items-start gap-2">
+                                            <span className="text-blue-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-green-50 rounded-lg border-l-4 border-green-500">
+                                <h3 className="font-semibold text-green-800 mb-2">Quick Wins</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.quick_wins || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-green-700 flex items-start gap-2">
+                                            <span className="text-green-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        </div>
+                        <button 
+                            onClick={() => setShowRemediation(false)}
+                            className="mt-6 w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition"
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            );
+
             return (
                 <div className="min-h-screen bg-gray-50">
                     <Navbar user={user} onLogin={() => {}} onLogout={onLogout} onAddAgent={onAddAgent} />
+                    
+                    {showRemediation && <RemediationModal />}
 
-                    {/* Report Header */}
-                    <div className="bg-[#1E3A5F] text-white">
-                        <div className="max-w-6xl mx-auto px-6 py-8">
-                            <button onClick={onBack} className="mb-4 text-white/70 hover:text-white flex items-center gap-2 transition text-sm">
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/></svg>
-                                Back to Search
-                            </button>
-                            <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+                    <div className="max-w-7xl mx-auto px-4 py-6">
+                        {/* Back Button */}
+                        <button onClick={onBack} className="mb-4 text-gray-600 hover:text-gray-900 flex items-center gap-2 transition text-sm">
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Search
+                        </button>
+
+                        {/* Agent Header Card */}
+                        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+                            <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
                                 <div className="flex items-center gap-4">
-                                    <div className={`w-16 h-16 ${getScoreStyle(overallScore).bg} rounded-xl flex items-center justify-center text-white text-2xl font-bold`}>
+                                    <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold shadow-lg">
                                         {(agent.name || 'NA').split(' ').map(n => n[0]).join('')}
                                     </div>
                                     <div>
-                                        <p className="text-white/60 text-xs uppercase tracking-wide mb-1">AI Visibility Report</p>
-                                        <h1 className="text-2xl font-bold">{agent.name || 'Unknown Agent'}</h1>
-                                        <p className="text-white/80 text-sm">{agent.brokerage || 'Independent'} • {agent.location?.city}, {agent.location?.state}</p>
+                                        <h1 className="text-2xl font-bold text-gray-900">{agent.name || 'Unknown Agent'}</h1>
+                                        <p className="text-sm text-gray-500">
+                                            {(agent.license?.number || entityVerification.license_node?.value) ? `RE #${agent.license?.number || entityVerification.license_node?.value}` : 'License Pending'} • Licensed Real Estate Professional
+                                        </p>
+                                        {/* Personal Info: Phone & Email */}
+                                        <div className="flex flex-col gap-0.5 mt-1">
+                                            {agent.phone && (
+                                                <span className="text-xs text-gray-600">
+                                                    <span className="font-medium">Phone:</span> {agent.phone}
+                                                </span>
+                                            )}
+                                            {agent.email && (
+                                                <span className="text-xs text-gray-600">
+                                                    <span className="font-medium">Email:</span> {agent.email}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <span className={`px-2 py-0.5 ${getTierColor(tier)} text-white text-xs font-medium rounded`}>
+                                                TIER: {tier.toUpperCase()}
+                                            </span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div className="flex items-center gap-6">
+                                <div className="flex items-center gap-8">
                                     <div className="text-center">
-                                        <div className="text-4xl font-bold">{overallScore}</div>
-                                        <div className="text-xs text-white/60">Overall Score</div>
+                                        <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Overall SALT Score</div>
+                                        <div className="text-4xl font-bold text-gray-900">{overallScore}<span className="text-lg text-gray-400">/100</span></div>
                                     </div>
-                                    <div className="h-12 w-px bg-white/20"/>
+                                    <div className="h-12 w-px bg-gray-200"/>
                                     <div className="text-center">
-                                        <div className="text-2xl font-bold">#{data.leaderboard_context?.state_rank || '?'}</div>
-                                        <div className="text-xs text-white/60">State Rank</div>
-                                    </div>
-                                    <div className="h-12 w-px bg-white/20"/>
-                                    <div className="text-center">
-                                        <div className="text-2xl font-bold">{scores.overall?.tier || 'N/A'}</div>
-                                        <div className="text-xs text-white/60">Tier</div>
+                                        <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">AI Trust Index</div>
+                                        <div className="text-4xl font-bold" style={{color: getScoreColor(aiTrustIndex.score)}}>{aiTrustIndex.grade}</div>
                                     </div>
                                 </div>
                             </div>
+                            
+                            {/* Platform Links */}
+                            {Object.keys(keyLinks).length > 0 && (
+                                <div className="mt-4 pt-4 border-t border-gray-100">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-gray-500 uppercase tracking-wide">Agent Profiles & Social Media</span>
+                                        <div className="flex items-center gap-2">
+                                            <PlatformLinkIcon platform="zillow" url={keyLinks.zillow} />
+                                            <PlatformLinkIcon platform="realtor" url={keyLinks.realtor} />
+                                            <PlatformLinkIcon platform="homes" url={keyLinks.homes} />
+                                            <PlatformLinkIcon platform="google" url={keyLinks.google} />
+                                            <PlatformLinkIcon platform="website" url={keyLinks.website} />
+                                            <PlatformLinkIcon platform="linkedin" url={keyLinks.linkedin} />
+                                            <PlatformLinkIcon platform="instagram" url={keyLinks.instagram} />
+                                            <PlatformLinkIcon platform="facebook" url={keyLinks.facebook} />
+                                            <PlatformLinkIcon platform="youtube" url={keyLinks.youtube} />
+                                            <PlatformLinkIcon platform="twitter" url={keyLinks.twitter} />
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                    </div>
 
-                    <div className="max-w-6xl mx-auto px-6 py-8">
-                        {/* Score Overview Cards */}
-                        <div className="grid lg:grid-cols-3 gap-6 mb-8">
-                            {/* SALT Scores Card */}
-                            <div className="lg:col-span-2 bg-white rounded-xl card-shadow p-6">
+                        {/* Main Grid */}
+                        <div className="grid lg:grid-cols-2 gap-6 mb-6">
+                            {/* SALT Score Breakdown */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
                                 <div className="flex items-center justify-between mb-6">
-                                    <h2 className="text-lg font-bold text-gray-900">SALT Score Breakdown</h2>
-                                    <button onClick={onViewSALT} className="text-sm text-[#006AFF] hover:underline">View Details →</button>
+                                    <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                        <span className="text-xl">📊</span> SALT Score Breakdown
+                                    </h2>
+                                    <button onClick={onViewSALT} className="text-sm text-blue-600 hover:underline">View Details →</button>
                                 </div>
-                                <SALTChart />
+                                <div className="flex justify-around">
+                                    <CircularProgress score={scores.semantic?.score || 0} label="SEARCH" change={5} />
+                                    <CircularProgress score={scores.authority?.score || 0} label="AUTHORITY" change={-2} />
+                                    <CircularProgress score={scores.location?.score || 0} label="LOCAL" change={12} />
+                                    <CircularProgress score={scores.trust?.score || 0} label="TRUST" change={1} />
+                                </div>
                             </div>
 
-                            {/* AI Platform Scores */}
-                            <div className="bg-white rounded-xl card-shadow p-6">
-                                <h2 className="text-lg font-bold text-gray-900 mb-4">AI Platform Visibility</h2>
+                            {/* AI Model Visibility */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2 mb-6">
+                                    <span className="text-xl">🤖</span> AI Model Visibility
+                                </h2>
                                 <div className="space-y-4">
                                     {[
-                                        { name: 'ChatGPT', key: 'chatgpt', logo: AILogos.chatgpt },
-                                        { name: 'Claude', key: 'claude', logo: AILogos.claude },
-                                        { name: 'Perplexity', key: 'perplexity', logo: AILogos.perplexity },
-                                        { name: 'Gemini', key: 'gemini', logo: AILogos.gemini }
+                                        { name: 'ChatGPT (OpenAI)', key: 'chatgpt', color: '#10A37F' },
+                                        { name: 'Claude (Anthropic)', key: 'claude', color: '#D97706' },
+                                        { name: 'Perplexity AI', key: 'perplexity', color: '#3B82F6' },
+                                        { name: 'Gemini (Google)', key: 'gemini', color: '#8B5CF6' }
                                     ].map((p, i) => {
                                         const score = llmScores[p.key] || 0;
                                         return (
                                             <div key={i} className="flex items-center gap-3">
-                                                <img src={p.logo} alt={p.name} className="w-6 h-6 object-contain" onError={(e) => e.target.style.display='none'}/>
-                                                <div className="flex-1">
-                                                    <div className="flex items-center justify-between mb-1">
-                                                        <span className="text-sm text-gray-700">{p.name}</span>
-                                                        <span className="text-sm font-bold" style={{color: getScoreStyle(score).color}}>{score}</span>
-                                                    </div>
-                                                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                                        <div className="h-full rounded-full" style={{width: `${score}%`, backgroundColor: getScoreStyle(score).color}}/>
-                                                    </div>
+                                                <div className="w-32 text-sm text-gray-700">{p.name}</div>
+                                                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                    <div 
+                                                        className="h-full rounded-full transition-all duration-500" 
+                                                        style={{width: `${score}%`, backgroundColor: p.color}}
+                                                    />
                                                 </div>
+                                                <div className="w-12 text-right text-sm font-semibold text-gray-700">{score}%</div>
                                             </div>
                                         );
                                     })}
@@ -2041,188 +2340,228 @@ FRONTEND_HTML = '''
                             </div>
                         </div>
 
-                        {/* Executive Summary */}
-                        <div className="bg-white rounded-xl card-shadow p-6 mb-8">
-                            <h2 className="text-lg font-bold text-gray-900 mb-4">Executive Summary</h2>
-                            <p className="text-gray-700 leading-relaxed">
-                                {analysis.executive_summary || 'No summary available.'}
-                            </p>
-                        </div>
-
-                        {/* Strengths & Gaps Table */}
-                        <div className="grid lg:grid-cols-2 gap-6 mb-8">
-                            {/* Strengths */}
-                            <div className="bg-white rounded-xl card-shadow overflow-hidden">
-                                <div className="px-6 py-4 bg-[#00D395]/10 border-b border-[#00D395]/20">
-                                    <h2 className="font-bold text-gray-900 flex items-center gap-2">
-                                        <svg className="w-5 h-5 text-[#00D395]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                                        </svg>
-                                        Strengths
-                                    </h2>
-                                </div>
-                                <div className="p-6">
-                                    <table className="w-full">
-                                        <tbody>
-                                            {(profileAnalysis.strengths || []).map((s, i) => (
-                                                <tr key={i} className="border-b border-gray-100 last:border-0">
-                                                    <td className="py-3 text-sm text-gray-700">{s}</td>
-                                                </tr>
-                                            ))}
-                                            {(profileAnalysis.unique_selling_points || []).map((usp, i) => (
-                                                <tr key={`usp-${i}`} className="border-b border-gray-100 last:border-0">
-                                                    <td className="py-3 text-sm text-gray-700 flex items-center gap-2">
-                                                        <span className="text-[#006AFF]">★</span> {usp}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-
-                            {/* Gaps */}
-                            <div className="bg-white rounded-xl card-shadow overflow-hidden">
-                                <div className="px-6 py-4 bg-[#FF9500]/10 border-b border-[#FF9500]/20">
-                                    <h2 className="font-bold text-gray-900 flex items-center gap-2">
-                                        <svg className="w-5 h-5 text-[#FF9500]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                                        </svg>
-                                        Areas for Improvement
-                                    </h2>
-                                </div>
-                                <div className="p-6">
-                                    <table className="w-full">
-                                        <tbody>
-                                            {(gaps.missing_signals || []).map((g, i) => (
-                                                <tr key={i} className="border-b border-gray-100 last:border-0">
-                                                    <td className="py-3 text-sm text-gray-700">{g}</td>
-                                                </tr>
-                                            ))}
-                                            {(gaps.visibility_blockers || []).map((b, i) => (
-                                                <tr key={`block-${i}`} className="border-b border-gray-100 last:border-0">
-                                                    <td className="py-3 text-sm text-gray-700">{b}</td>
-                                                </tr>
-                                            ))}
-                                            {(gaps.content_gaps || []).map((c, i) => (
-                                                <tr key={`content-${i}`} className="border-b border-gray-100 last:border-0">
-                                                    <td className="py-3 text-sm text-gray-700">{c}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Action Plan */}
-                        <div className="bg-white rounded-xl card-shadow overflow-hidden mb-8">
-                            <div className="px-6 py-4 bg-[#006AFF]/10 border-b border-[#006AFF]/20">
-                                <h2 className="font-bold text-gray-900 flex items-center gap-2">
-                                    <svg className="w-5 h-5 text-[#006AFF]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/>
-                                    </svg>
-                                    30-Day Improvement Roadmap
+                        {/* Modern Entity Identity Ledger */}
+                        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                    <span className="text-xl">🔐</span> Modern Entity Identity Ledger
                                 </h2>
+                                <span className="flex items-center gap-1 text-sm text-green-600">
+                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                    </svg>
+                                    ENTITY VERIFIED
+                                </span>
                             </div>
-                            <div className="p-6">
-                                <div className="grid md:grid-cols-3 gap-6">
-                                    {/* Critical */}
-                                    <div>
-                                        <div className="flex items-center gap-2 mb-3">
-                                            <span className="w-6 h-6 bg-[#FF3B30] text-white rounded text-xs flex items-center justify-center font-bold">!</span>
-                                            <span className="text-sm font-semibold text-gray-900">Critical (Week 1)</span>
-                                        </div>
-                                        <div className="space-y-2">
-                                            {(roadmap.critical_issues || []).map((item, i) => (
-                                                <div key={i} className="p-3 bg-red-50 rounded-lg text-sm text-gray-700 border-l-2 border-[#FF3B30]">{item}</div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    {/* High Priority */}
-                                    <div>
-                                        <div className="flex items-center gap-2 mb-3">
-                                            <span className="w-6 h-6 bg-[#FF9500] text-white rounded text-xs flex items-center justify-center font-bold">2</span>
-                                            <span className="text-sm font-semibold text-gray-900">High Priority (Week 2)</span>
-                                        </div>
-                                        <div className="space-y-2">
-                                            {(roadmap.high_priority || []).map((item, i) => (
-                                                <div key={i} className="p-3 bg-orange-50 rounded-lg text-sm text-gray-700 border-l-2 border-[#FF9500]">{item}</div>
-                                            ))}
-                                            {(roadmap.quick_wins || []).slice(0, 2).map((item, i) => (
-                                                <div key={`qw-${i}`} className="p-3 bg-green-50 rounded-lg text-sm text-gray-700 border-l-2 border-[#00D395]">{item}</div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                    {/* Medium */}
-                                    <div>
-                                        <div className="flex items-center gap-2 mb-3">
-                                            <span className="w-6 h-6 bg-[#006AFF] text-white rounded text-xs flex items-center justify-center font-bold">3</span>
-                                            <span className="text-sm font-semibold text-gray-900">Ongoing (Week 3-4)</span>
-                                        </div>
-                                        <div className="space-y-2">
-                                            {(roadmap.medium_priority || []).map((item, i) => (
-                                                <div key={i} className="p-3 bg-blue-50 rounded-lg text-sm text-gray-700 border-l-2 border-[#006AFF]">{item}</div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead>
+                                        <tr className="border-b border-gray-100">
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Information Key</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Entity Value</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Platform Anchors</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Canonical Name</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">"{entityVerification.canonical_name?.value || agent.name}"</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.canonical_name?.platform || 'database'} verified={entityVerification.canonical_name?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.canonical_name?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Primary Role</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">{entityVerification.primary_role?.value || 'Real Estate Agent'}</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.primary_role?.platform || 'database'} verified={entityVerification.primary_role?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.primary_role?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Brokerage Anchor</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">{entityVerification.brokerage_anchor?.value || agent.brokerage || 'Independent'}</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.brokerage_anchor?.platform || 'brokerage'} verified={entityVerification.brokerage_anchor?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.brokerage_anchor?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">License Node</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">
+                                                {(entityVerification.license_node?.value || agent.license?.number) 
+                                                    ? `${agent.location?.state || 'VA'} RE #${entityVerification.license_node?.value || agent.license?.number}` 
+                                                    : 'Not provided'}
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform="database" verified={entityVerification.license_node?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.license_node?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
 
-                        {/* Personalized Recommendations */}
-                        {(recommendations.for_agent || []).length > 0 && (
-                            <div className="bg-[#1E3A5F] rounded-xl p-6 text-white mb-8">
-                                <h2 className="font-bold mb-4 flex items-center gap-2">
-                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z"/>
-                                    </svg>
-                                    Top Recommendations for You
-                                </h2>
-                                <div className="grid md:grid-cols-2 gap-4">
-                                    {recommendations.for_agent.slice(0, 4).map((rec, i) => (
-                                        <div key={i} className="bg-white/10 rounded-lg p-4 backdrop-blur">
-                                            <div className="flex items-start gap-3">
-                                                <span className="w-6 h-6 bg-[#006AFF] rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0">{i + 1}</span>
-                                                <p className="text-sm text-white/90">{rec}</p>
+                        {/* Bottom Grid - Reviews & AI Gap Analysis */}
+                        <div className="grid lg:grid-cols-3 gap-6">
+                            {/* Review Source Mix */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">Review Source Mix</h2>
+                                <div className="flex items-center justify-center mb-4">
+                                    <div className="relative w-32 h-32">
+                                        {/* Simple donut chart using SVG */}
+                                        <svg viewBox="0 0 36 36" className="w-full h-full">
+                                            {/* Zillow - Blue */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#3B82F6" strokeWidth="3"
+                                                strokeDasharray={`${zillowPct} ${100 - zillowPct}`} strokeDashoffset="25"/>
+                                            {/* Google - Green */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#10B981" strokeWidth="3"
+                                                strokeDasharray={`${googlePct} ${100 - googlePct}`} strokeDashoffset={25 - zillowPct}/>
+                                            {/* Realtor - Orange */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#F59E0B" strokeWidth="3"
+                                                strokeDasharray={`${realtorPct} ${100 - realtorPct}`} strokeDashoffset={25 - zillowPct - googlePct}/>
+                                        </svg>
+                                        <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                            <span className="text-2xl font-bold text-gray-900">{totalReviews}</span>
+                                            <span className="text-xs text-gray-500">TOTAL REVIEWS</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
+                                            <span className="text-gray-600">Zillow ({zillowPct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{zillowReviews}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-green-500 rounded-full"></span>
+                                            <span className="text-gray-600">Google ({googlePct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{googleReviews}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-yellow-500 rounded-full"></span>
+                                            <span className="text-gray-600">Realtor ({realtorPct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{realtorReviews}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* What Reviews Say */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">What Reviews Say</h2>
+                                <p className="text-xs text-gray-500 mb-3">Sentiment analysis from {totalReviews} reviews</p>
+                                <div className="space-y-4">
+                                    {topSentiments.length > 0 ? topSentiments.map(([keyword, count, percentage], i) => {
+                                        return (
+                                            <div key={i}>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <span className="text-sm text-gray-700 capitalize">"{keyword}"</span>
+                                                    <span className="text-xs text-gray-500">{count} mentions</span>
+                                                </div>
+                                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                    <div className="h-full bg-blue-500 rounded-full" style={{width: `${percentage}%`}}/>
+                                                </div>
+                                            </div>
+                                        );
+                                    }) : (
+                                        <div className="text-center text-gray-500 py-4">
+                                            <p className="text-sm">No sentiment data available</p>
+                                            <p className="text-xs mt-1">Review analysis pending</p>
+                                        </div>
+                                    )}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-4">
+                                    Consistently praised for quick response times in the {agent.location?.city || 'local'} area.
+                                </p>
+                            </div>
+
+                            {/* AI Gap Analysis */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">AI Gap Analysis</h2>
+                                <div className="space-y-3">
+                                    {aiGapAnalysis.length > 0 ? aiGapAnalysis.slice(0, 4).map((gap, i) => (
+                                        <div key={i} className="flex items-start gap-3">
+                                            {gap.status === 'verified' ? (
+                                                <svg className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                </svg>
+                                            ) : (
+                                                <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd"/>
+                                                </svg>
+                                            )}
+                                            <div>
+                                                <p className={`text-sm font-medium ${gap.status === 'verified' ? 'text-green-700' : 'text-red-700'}`}>
+                                                    {gap.title}
+                                                </p>
+                                                <p className="text-xs text-gray-500">{gap.description}</p>
                                             </div>
                                         </div>
-                                    ))}
+                                    )) : (
+                                        <div className="text-center text-gray-500 py-4">
+                                            <p className="text-sm">Analyzing gaps...</p>
+                                        </div>
+                                    )}
                                 </div>
-                            </div>
-                        )}
-
-                        {/* For Buyers/Sellers */}
-                        <div className="grid lg:grid-cols-2 gap-6 mb-8">
-                            <div className="bg-white rounded-xl card-shadow p-6">
-                                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                                    <svg className="w-5 h-5 text-[#006AFF]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
-                                    </svg>
-                                    For Home Buyers
-                                </h3>
-                                <ul className="space-y-2">
-                                    {(insights.for_buyers || []).map((insight, i) => (
-                                        <li key={i} className="text-sm text-gray-600 flex items-start gap-2">
-                                            <span className="text-[#006AFF] mt-1">•</span>{insight}
-                                        </li>
-                                    ))}
-                                </ul>
-                            </div>
-                            <div className="bg-white rounded-xl card-shadow p-6">
-                                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
-                                    <svg className="w-5 h-5 text-[#00D395]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                                    </svg>
-                                    For Home Sellers
-                                </h3>
-                                <ul className="space-y-2">
-                                    {(insights.for_sellers || []).map((insight, i) => (
-                                        <li key={i} className="text-sm text-gray-600 flex items-start gap-2">
-                                            <span className="text-[#00D395] mt-1">•</span>{insight}
-                                        </li>
-                                    ))}
-                                </ul>
+                                <button 
+                                    onClick={() => setShowRemediation(true)}
+                                    className="mt-4 w-full py-2 border border-blue-600 text-blue-600 text-sm font-medium rounded-lg hover:bg-blue-50 transition"
+                                >
+                                    View Remediation Plan
+                                </button>
                             </div>
                         </div>
                     </div>

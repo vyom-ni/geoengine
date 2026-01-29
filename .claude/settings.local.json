@@ -1,16 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(curl:*)",
-      "Bash(python -c:*)",
-      "Bash(copy:*)",
-      "Bash(python:*)",
-      "Bash(pip install:*)",
-      "Bash(timeout /t 3)",
-      "Bash(findstr:*)",
-      "Bash(exit 0)",
-      "Bash(python3 -m pip list:*)",
-      "Bash(powershell -Command:*)"
-    ]
+      "Bash(\".venv/Scripts/python.exe\" test_bailey_jenkins.py)",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import pandas as pd; df = pd.read_excel(''US_Real_Estate_Agents_Database.xlsx''); print(f''Total agents in database: {len(df)}''); print(f''\\nFirst 5 agents:''); print(df[[''Realtor Name'', ''Office (Source Google Business Profile)'']].head().to_string())\")"
+    ],
+    "deny": [],
+    "ask": []
   }
 }
