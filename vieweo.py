@@ -1,71 +1,193 @@
+#!/usr/bin/env python3
 """
 Vieweo - AI Visibility Platform for Real Estate Agents
-GEO (Generative Engine Optimization) Scoring System
-Phase 1: Login → Free Snapshot → Paywall → Full Report
+Production-Ready Version with Modern UI
 """
 
-from flask import Flask, jsonify, request, render_template_string, session, Response
-from flask_cors import CORS
-from dotenv import load_dotenv
 import os
-import json
-import pandas as pd
-from datetime import datetime
-import secrets
+import sys
+import traceback
+import threading
+import gc
+from functools import lru_cache
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file
 
-load_dotenv()
-
+from flask import Flask, request, jsonify, session
 from agent_intelligence_v2 import AgentIntelligenceSystem
 
+# Flask Setup
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-CORS(app)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'vieweo-secret-key-change-in-production')
+app.config['SESSION_PERMANENT'] = True
+app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours
+app.config['PROPAGATE_EXCEPTIONS'] = True
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max request size
+
+# Thread-safe lock for system initialization
+_system_lock = threading.Lock()
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global error handler that prints traceback"""
+    traceback.print_exc()
+    return jsonify({'error': str(e), 'type': type(e).__name__}), 500
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': 'Not found'}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/favicon.ico')
+def favicon():
+    return '', 204  # No content
+
+@app.route('/images/<path:filename>')
+def serve_images(filename):
+    """Serve images from the images folder"""
+    import os
+    from flask import send_from_directory
+    images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images')
+    return send_from_directory(images_dir, filename)
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for monitoring"""
+    global system
+    return jsonify({
+        'status': 'healthy',
+        'system_loaded': system is not None,
+        'agents_count': len(system.db.df) if system else 0
+    })
 
 # Configuration
 class Config:
-    EXCEL_PATH = os.environ.get('EXCEL_PATH', 'US_Real_Estate_Agents_Database.xlsx')
+    EXCEL_PATH = os.environ.get('EXCEL_PATH', 'US_Real_Estate_Agents_Database2.xlsx')
     GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
+    OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
     PORT = int(os.environ.get('PORT', 5000))
 
 system = None
+_system_loading = False
 
-def get_system():
-    global system
-    if system is None:
-        excel_path = Config.EXCEL_PATH
-        for path in [Config.EXCEL_PATH, 'US_Real_Estate_Agents_Database.xlsx', 
-                     'US_Real_Estate_Agents_Database__2_.xlsx', 
-                     '/mnt/user-data/uploads/US_Real_Estate_Agents_Database__2_.xlsx',
-                     'data/US_Real_Estate_Agents_Database.xlsx']:
-            if os.path.exists(path):
-                excel_path = path
-                break
-        system = AgentIntelligenceSystem(excel_path, Config.GEMINI_API_KEY)
-    return system
+# In-memory cache for agent analysis results (avoids session cookie overflow)
+# Format: {agent_name_lower: {'data': result, 'timestamp': time}}
+_agent_cache = {}
+_cache_ttl = 300  # 5 minutes TTL
+
+def get_cached_agent(name):
+    """Get cached agent data if available and not expired"""
+    import time
+    key = name.lower().strip()
+    if key in _agent_cache:
+        entry = _agent_cache[key]
+        if time.time() - entry['timestamp'] < _cache_ttl:
+            return entry['data']
+        else:
+            del _agent_cache[key]
+    return None
+
+def set_cached_agent(name, data):
+    """Cache agent data with timestamp"""
+    import time
+    key = name.lower().strip()
+    _agent_cache[key] = {'data': data, 'timestamp': time.time()}
+
+def get_system(force_reload=False):
+    """Get or initialize the global system instance (thread-safe singleton)"""
+    global system, _system_loading
+
+    # Return existing system if already loaded
+    if system is not None and not force_reload:
+        return system
+
+    with _system_lock:
+        # Double-check after acquiring lock
+        if system is not None and not force_reload:
+            return system
+
+        # Prevent multiple simultaneous loads
+        if _system_loading:
+            import time
+            # Wait for ongoing load to complete
+            for _ in range(50):  # Wait up to 5 seconds
+                time.sleep(0.1)
+                if system is not None:
+                    return system
+            raise RuntimeError("System initialization timeout")
+
+        try:
+            _system_loading = True
+
+            # Find database file
+            excel_path = Config.EXCEL_PATH
+            for path in [Config.EXCEL_PATH, 'US_Real_Estate_Agents_Database.xlsx',
+                         'US_Real_Estate_Agents_Database__2_.xlsx',
+                         '/mnt/user-data/uploads/US_Real_Estate_Agents_Database__2_.xlsx',
+                         'data/US_Real_Estate_Agents_Database.xlsx']:
+                if os.path.exists(path):
+                    excel_path = path
+                    break
+
+            print(f"\n{'='*60}")
+            print(f"🚀 INITIALIZING VIEWEO SYSTEM")
+            print(f"{'='*60}")
+            system = AgentIntelligenceSystem(
+                excel_path, 
+                gemini_api_key=Config.GEMINI_API_KEY,
+                openai_api_key=Config.OPENAI_API_KEY
+            )
+            print(f"{'='*60}")
+            print(f"✅ SYSTEM READY - {len(system.db.df)} agents loaded")
+            print(f"{'='*60}\n")
+            
+            # Force garbage collection after heavy initialization
+            gc.collect()
+            
+            return system
+        finally:
+            _system_loading = False
 
 # ============== API ROUTES ==============
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Simple login - store name/email in session"""
+    """Simple login - store name/email in session
+
+    Admin credentials for testing:
+    - Email: admin@vieweo.com
+    - Name: Admin (any first/last name)
+    """
     data = request.get_json() or {}
     name = data.get('name', '').strip()
     email = data.get('email', '').strip()
-    
+
     if not name or not email:
         return jsonify({'error': 'Name and email are required'}), 400
-    
-    # Check for admin credentials
-    is_admin = email.lower() == 'admin@gmail.com' and name.lower() == 'admin'
-    
+
+    # Check for admin credentials (full access to everything)
+    is_admin = email.lower() == 'admin@vieweo.com'
+
     session['user'] = {
-        'name': name, 
-        'email': email, 
-        'logged_in': True, 
-        'paid': is_admin,  # Admin gets free access
+        'name': name,
+        'email': email,
+        'logged_in': True,
+        'paid': is_admin,  # Admin gets full paid access
         'is_admin': is_admin
     }
+
+    if is_admin:
+        print(f"🔑 Admin login: {name}")
+    else:
+        print(f"👤 User login: {name} ({email})")
+
     return jsonify({'success': True, 'user': session['user']})
 
 @app.route('/api/auth/status', methods=['GET'])
@@ -73,12 +195,19 @@ def auth_status():
     """Check auth status"""
     return jsonify(session.get('user', {'logged_in': False, 'paid': False}))
 
+@app.route('/api/auth/logout', methods=['POST'])
+def logout():
+    """Logout user"""
+    session.clear()
+    return jsonify({'success': True})
+
 @app.route('/api/auth/upgrade', methods=['POST'])
 def upgrade():
     """Simulate payment upgrade"""
     if 'user' not in session:
         return jsonify({'error': 'Not logged in'}), 401
     session['user']['paid'] = True
+    session.modified = True
     return jsonify({'success': True, 'user': session['user']})
 
 @app.route('/api/search', methods=['GET'])
@@ -87,101 +216,349 @@ def search_agents():
     query = request.args.get('q', '').strip()
     if not query:
         return jsonify({'error': 'Query required'}), 400
-    
+
     sys = get_system()
     results = sys.db.search(query)[:10]
-    
+
+    # Format results - ensure all fields are present including brokerage
+    formatted_results = []
+    for r in results:
+        formatted_results.append({
+            'id': r.get('id', ''),
+            'name': r.get('name', ''),
+            'city': r.get('city', ''),
+            'state': r.get('state', ''),
+            'brokerage': r.get('brokerage', '')
+        })
+
     return jsonify({
-        'count': len(results),
-        'results': [{'id': r.get('Agent_ID'), 'name': r.get('Full_Name'), 
-                     'city': r.get('City'), 'state': r.get('State')} for r in results]
+        'count': len(formatted_results),
+        'results': formatted_results
     })
 
 @app.route('/api/visibility/free', methods=['GET'])
 def free_visibility():
-    """Free visibility snapshot - limited data"""
+    """Basic agent details - no login required. SALT scores require login.
+    Uses in-memory cache to avoid session cookie overflow."""
     name = request.args.get('name', '').strip()
+    print(f"\n🔍 Visibility request for: '{name}'")
+
     if not name:
         return jsonify({'error': 'Agent name required'}), 400
+
+    # Get user status first
+    user = session.get('user', {})
+    is_logged_in = bool(user) and user.get('logged_in', False)
+    is_admin = user.get('is_admin', False)
+
+    # Check in-memory cache first (avoids cookie overflow issues)
+    result = get_cached_agent(name)
     
-    try:
-        sys = get_system()
-        result = sys.analyze_agent(name)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
+    if result:
+        print(f"✅ Using cached analysis for: {name}")
+    else:
+        # No cache - fetch and analyze
+        try:
+            sys = get_system()
+            result = sys.analyze_agent(name)
+            print(f"✅ Analysis complete for: {name}")
+
+            # Cache in memory (not in session to avoid cookie overflow)
+            if 'error' not in result:
+                set_cached_agent(name, result)
+        except Exception as e:
+            print(f"❌ Error analyzing agent: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
+
     if 'error' in result:
-        return jsonify(result), 404
-    
-    # Return LIMITED free data
+        print(f"❌ Agent not found: {name}")
+        return jsonify({'error': result['error'], 'not_found': True}), 404
+
+    # Extract data from cached/fresh result
     agent = result['agent']
     analysis = result['analysis']
     lb = result.get('leaderboard_context', {})
-    
-    return jsonify({
+
+    # Safe score access - ensure we get numeric values
+    scores = analysis.get('scores', {})
+    overall_score = int(scores.get('overall', {}).get('score', 0) or 0)
+    semantic_score = int(scores.get('semantic', {}).get('score', 0) or 0)
+    authority_score = int(scores.get('authority', {}).get('score', 0) or 0)
+    location_score = int(scores.get('location', {}).get('score', 0) or 0)
+    trust_score = int(scores.get('trust', {}).get('score', 0) or 0)
+
+    # Debug log the scores
+    print(f"📊 SALT Scores - S:{semantic_score} A:{authority_score} L:{location_score} T:{trust_score} Overall:{overall_score}")
+
+    # Get years of experience - prefer scraped data from web, fallback to database
+    web_signals = analysis.get('web_signals_summary', {})
+    scraped_years_experience = web_signals.get('years_experience', 0)
+    db_years_experience = agent.get('experience', {}).get('years', 0)
+    years_experience = scraped_years_experience if scraped_years_experience > 0 else db_years_experience
+    print(f"📅 Years Experience - Scraped: {scraped_years_experience}, DB: {db_years_experience}, Using: {years_experience}")
+
+    # Build response with tiered access
+    response_data = {
+        # TIER 1: Always visible (no login required)
         'agent': {
-            'name': agent['name'],
-            'city': agent['location']['city'],
-            'state': agent['location']['state'],
-            'brokerage': agent['brokerage']
+            'name': agent.get('name', ''),
+            'city': agent.get('location', {}).get('city', ''),
+            'state': agent.get('location', {}).get('state', ''),
+            'brokerage': agent.get('brokerage', ''),
+            'years_experience': years_experience,  # Prefer scraped data
+            'phone': agent.get('phone', ''),
+            'email': agent.get('email', '') or agent.get('online_presence', {}).get('email', ''),
+            'website': agent.get('online_presence', {}).get('website', ''),
         },
-        'visibility_score': analysis['scores']['overall']['score'],
-        'visibility_grade': analysis['scores']['overall']['grade'],
-        'visibility_tier': analysis['scores']['overall']['tier'],
-        'market_presence': 'High' if analysis['scores']['overall']['score'] >= 80 else 'Medium' if analysis['scores']['overall']['score'] >= 60 else 'Low',
-        'ai_discoverability': 'Strong' if analysis['scores']['authority']['score'] >= 75 else 'Moderate' if analysis['scores']['authority']['score'] >= 50 else 'Weak',
-        'ranking_teaser': f"You are #{lb.get('state_rank', '?')} of {lb.get('state_total', '?')} in {agent['location']['state']}",
-        'locked_sections': ['leaderboard', 'competitors', 'detailed_scores', 'geo_signals', 'action_plan']
-    })
+        'basic_metrics': {
+            'average_rating': agent.get('reviews', {}).get('average_rating', 0),
+            'total_reviews': agent.get('reviews', {}).get('total_count', 0),
+            'specialization': agent.get('experience', {}).get('specialization', ''),
+        },
+        # Scraped review data from web sources
+        'scraped_data': {
+            'web_signals': analysis.get('web_signals_summary', {}),
+            'review_sources': analysis.get('web_signals_summary', {}).get('review_sources', {}),
+            'listings': analysis.get('web_signals_summary', {}).get('listings', {}),
+            'sources_checked': analysis.get('web_signals_summary', {}).get('sources_list', []),
+            'collection_errors': analysis.get('web_signals_summary', {}).get('error_details', []),
+        },
+        'visibility_score': overall_score,
+        'visibility_grade': scores.get('overall', {}).get('grade', 'N/A'),
+        'visibility_tier': scores.get('overall', {}).get('tier', 'Unknown'),
+
+        # TIER 2: Requires login (SALT scores)
+        'salt_scores': {
+            'semantic': semantic_score,
+            'authority': authority_score,
+            'location': location_score,
+            'trust': trust_score
+        } if is_logged_in or is_admin else None,
+
+        # LLM Visibility Scores (requires login)
+        'llm_visibility_scores': analysis.get('llm_visibility_scores', {
+            'chatgpt': 0,
+            'perplexity': 0,
+            'claude': 0,
+            'gemini': 0
+        }) if is_logged_in or is_admin else None,
+
+        'ranking_preview': {
+            'state_rank': lb.get('state_rank', '?'),
+            'state_total': lb.get('state_total', '?'),
+            'state': agent.get('location', {}).get('state', 'Unknown')
+        } if is_logged_in or is_admin else None,
+
+        # User status
+        'user_status': {
+            'logged_in': is_logged_in,
+            'is_admin': is_admin,
+            'paid': user.get('paid', False)
+        },
+
+        'requires_login_for': ['salt_scores', 'ranking_preview'] if not is_logged_in else [],
+        'requires_payment_for': ['full_report', 'competitors', 'action_plan']
+    }
+
+    print(f"✅ Returning data: score={overall_score}")
+    return jsonify(response_data)
 
 @app.route('/api/visibility/full', methods=['GET'])
 def full_visibility():
-    """Full visibility report - requires payment"""
+    """Full visibility report - requires payment.
+    Uses in-memory cache to avoid session cookie overflow."""
     user = session.get('user', {})
     if not user.get('paid'):
         return jsonify({'error': 'Payment required', 'upgrade_required': True}), 403
-    
+
     name = request.args.get('name', '').strip()
     if not name:
         return jsonify({'error': 'Agent name required'}), 400
+
+    # Check in-memory cache first
+    result = get_cached_agent(name)
     
+    if result:
+        print(f"✅ Using cached full report for: {name}")
+        return jsonify(result)
+
+    # Not in cache - analyze and cache
     sys = get_system()
     result = sys.analyze_agent(name)
-    
+
     if 'error' in result:
         return jsonify(result), 404
-    
+
+    # Cache in memory (not session to avoid cookie overflow)
+    set_cached_agent(name, result)
+    print(f"✅ Analyzed and cached full report for: {name}")
+
     return jsonify(result)
 
-@app.route('/api/leaderboard', methods=['GET'])
-def leaderboard():
-    """Leaderboard - requires payment"""
-    user = session.get('user', {})
-    if not user.get('paid'):
-        return jsonify({'error': 'Payment required', 'upgrade_required': True}), 403
-    
-    state = request.args.get('state', '')
-    city = request.args.get('city', '')
-    limit = int(request.args.get('limit', 20))
-    
-    sys = get_system()
-    df = sys.db.df
-    
-    if state:
-        df = df[df['State'] == state]
-    if city:
-        df = df[df['City'] == city]
-    
-    top = df.nlargest(limit, 'Credibility_Score')
-    
-    return jsonify({
-        'count': len(top),
-        'agents': [{'rank': i+1, 'name': r['Full_Name'], 'city': r['City'], 
-                    'state': r['State'], 'score': r['Credibility_Score']} 
-                   for i, (_, r) in enumerate(top.iterrows())]
-    })
+    return jsonify(result)
+
+@app.route('/api/agents/add', methods=['POST'])
+def add_agent():
+    """Add a new agent to the database with duplicate prevention"""
+    data = request.get_json() or {}
+
+    # Validate required fields
+    required_fields = ['full_name', 'city', 'state', 'phone']
+    for field in required_fields:
+        if not data.get(field):
+            return jsonify({'error': f'Missing required field: {field}'}), 400
+
+    try:
+        import pandas as pd
+
+        sys = get_system()
+
+        # Check for duplicates - by name and city/state combination
+        full_name = data['full_name'].strip()
+        city = data['city'].strip()
+        state = data['state'].strip().upper()
+        phone = data['phone'].strip()
+
+        # Normalize for comparison
+        name_lower = full_name.lower()
+        city_lower = city.lower()
+
+        # Check if agent already exists (same name + location OR same phone)
+        # Normalize phone for comparison
+        phone_digits = ''.join(filter(str.isdigit, phone))
+
+        # Build duplicate check conditions
+        name_location_match = (
+            (sys.db.df['Full_Name'].str.lower().str.strip() == name_lower) &
+            (sys.db.df['City'].str.lower().str.strip() == city_lower) &
+            (sys.db.df['State'].str.upper().str.strip() == state)
+        )
+
+        # Check phone match only if Phone_Number column exists and has data
+        if 'Phone_Number' in sys.db.df.columns and phone_digits:
+            phone_match = sys.db.df['Phone_Number'].fillna('').astype(str).str.replace(r'[^\d]', '', regex=True) == phone_digits
+            existing = sys.db.df[name_location_match | phone_match]
+        else:
+            existing = sys.db.df[name_location_match]
+
+        if len(existing) > 0:
+            existing_agent = existing.iloc[0]
+            return jsonify({
+                'error': f'Agent already exists: {existing_agent["Full_Name"]} in {existing_agent["City"]}, {existing_agent["State"]}',
+                'duplicate': True,
+                'existing_agent': existing_agent['Full_Name']
+            }), 409
+
+        # Generate unique Agent_ID
+        max_id = sys.db.df['Agent_ID'].astype(str).str.extract(r'(\d+)').astype(int).max()[0]
+        new_id = f"AG{max_id + 1:06d}"
+
+        # Prepare new agent row with correct column names from database
+        new_agent = {
+            'Agent_ID': new_id,
+            'Full_Name': full_name,
+            'City': city,
+            'State': state,
+            'Phone_Number': phone,
+            'Brokerage_Name': data.get('brokerage', '').strip(),
+            'Website_Links': data.get('website', '').strip(),
+            'Years_Experience': int(data.get('years_experience', 0) or 0),
+            'Specialization': data.get('specialization', '').strip(),
+            'Average_Rating': 0,
+            'Total_Reviews': 0,
+            'Credibility_Score': 0
+        }
+
+        # Add to DataFrame
+        sys.db.df = pd.concat([sys.db.df, pd.DataFrame([new_agent])], ignore_index=True)
+
+        # Update the name_lower column for the new agent (required for search indexing)
+        sys.db.df['name_lower'] = sys.db.df['Full_Name'].str.lower().str.strip()
+
+        # Save to Excel - try original file first, then backup if locked
+        excel_path = Config.EXCEL_PATH
+        # Get columns to save (exclude internal computed columns)
+        save_columns = [col for col in sys.db.df.columns if col not in ['name_lower', 'rating_rank', 'review_rank', 'experience_rank', 'credibility_rank']]
+        
+        saved = False
+        save_message = ""
+        
+        # First, check if the file can be opened for writing
+        def is_file_locked(filepath):
+            if not os.path.exists(filepath):
+                return False
+            try:
+                with open(filepath, 'a'):
+                    pass
+                return False
+            except (IOError, PermissionError):
+                return True
+        
+        if is_file_locked(excel_path):
+            # File is locked - save to a backup file instead
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = excel_path.replace('.xlsx', f'_backup_{timestamp}.xlsx')
+            
+            try:
+                sys.db.df[save_columns].to_excel(backup_path, index=False)
+                print(f"⚠️ Original file locked. Saved to backup: {backup_path}")
+                saved = True
+                save_message = f"Agent added! Note: The main database file was locked (possibly open in Excel). Data was saved to backup file: {os.path.basename(backup_path)}. Please close Excel and merge the backup file."
+            except Exception as e:
+                print(f"❌ Could not save to backup either: {e}")
+                raise Exception(f"Could not save agent. Please close Excel and try again: {str(e)}")
+        else:
+            # File is not locked - save directly
+            try:
+                sys.db.df[save_columns].to_excel(excel_path, index=False)
+                print(f"✅ Saved to Excel: {excel_path} (total agents: {len(sys.db.df)})")
+                saved = True
+                save_message = f'Agent "{new_agent["Full_Name"]}" added successfully!'
+            except Exception as e:
+                print(f"❌ Error saving to Excel: {e}")
+                raise Exception(f"Could not save agent: {str(e)}")
+        
+        if not saved:
+            raise Exception("Failed to save agent to database")
+
+        # Rebuild search cache
+        sys.db._build_search_cache()
+        print(f"🔍 Search cache rebuilt with {len(sys.db.search_index)} keys")
+
+        print(f"✅ Added new agent: {new_agent['Full_Name']} (ID: {new_id})")
+
+        return jsonify({
+            'success': True,
+            'agent_id': new_id,
+            'agent_name': new_agent['Full_Name'],
+            'message': save_message + ' Please refresh the page to see them in search suggestions.',
+            'refresh_required': True
+        })
+
+    except Exception as e:
+        print(f"❌ Error adding agent: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to add agent: {str(e)}'}), 500
 
 # ============== FRONTEND ==============
+
+@app.route('/test')
+def test_route():
+    """Simple test route to verify server is working"""
+    return "Server is working!"
+
+@app.route('/')
+def index():
+    try:
+        return FRONTEND_HTML
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"Error: {str(e)}", 500
 
 FRONTEND_HTML = '''
 <!DOCTYPE html>
@@ -189,886 +566,2311 @@ FRONTEND_HTML = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vieweo - Be the Agent AI Recommends</title>
+    <title>Vieweo - AI Visibility Platform for Real Estate Agents</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        * { font-family: 'Inter', -apple-system, sans-serif; }
-        .blur-content { filter: blur(8px); pointer-events: none; user-select: none; }
-        .gradient-text { background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        * {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-in { animation: fadeIn 0.6s ease-out forwards; }
-        .score-ring { transition: stroke-dashoffset 1.5s ease-out; }
+        @keyframes slideIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+        .animate-in { animation: fadeIn 0.5s ease-out forwards; }
+        .animate-slide { animation: slideIn 0.4s ease-out forwards; }
+        .animate-float { animation: float 3s ease-in-out infinite; }
+        
+        /* Zillow-inspired color scheme */
+        :root {
+            --primary: #006AFF;
+            --primary-dark: #0051CC;
+            --secondary: #1E3A5F;
+            --accent: #00D395;
+            --warning: #FF9500;
+            --error: #FF3B30;
+        }
+        
+        .text-primary { color: var(--primary); }
+        .bg-primary { background-color: var(--primary); }
+        .border-primary { border-color: var(--primary); }
+        
+        .glass-effect {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+        
+        /* Score bars with real estate colors */
+        .score-bar-semantic { background: linear-gradient(90deg, #006AFF, #0051CC); }
+        .score-bar-authority { background: linear-gradient(90deg, #8B5CF6, #7C3AED); }
+        .score-bar-location { background: linear-gradient(90deg, #00D395, #10B981); }
+        .score-bar-trust { background: linear-gradient(90deg, #FF9500, #F59E0B); }
+        
+        /* Radial chart for scores */
+        .score-ring {
+            background: conic-gradient(var(--primary) calc(var(--score) * 1%), #e5e7eb 0);
+            border-radius: 50%;
+        }
+        
+        /* Real estate card shadows */
+        .card-shadow {
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
+        }
+        .card-shadow-lg {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.07), 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        /* Hover effects */
+        .hover-lift { transition: transform 0.2s, box-shadow 0.2s; }
+        .hover-lift:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(0,0,0,0.12); }
     </style>
 </head>
 <body class="bg-gray-50">
     <div id="root"></div>
+
     <script type="text/babel">
-        const { useState, useEffect } = React;
-        
-        // ============== COMPONENTS ==============
-        
-        // Lock Icon
-        const LockIcon = ({ size = 20 }) => (
-            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                <path d="M7 11V7a5 5 0 0110 0v4"/>
-            </svg>
-        );
-        
-        // Score Ring
-        const ScoreRing = ({ score, size = 160, label }) => {
-            const radius = (size - 16) / 2;
-            const circumference = 2 * Math.PI * radius;
-            const offset = circumference - (score / 100) * circumference;
-            const color = score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444';
-            
-            return (
-                <div className="relative" style={{ width: size, height: size }}>
-                    <svg width={size} height={size} className="transform -rotate-90">
-                        <circle cx={size/2} cy={size/2} r={radius} stroke="#e5e7eb" strokeWidth="12" fill="none"/>
-                        <circle cx={size/2} cy={size/2} r={radius} stroke={color} strokeWidth="12" fill="none"
-                            strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} className="score-ring"/>
-                    </svg>
-                    <div className="absolute inset-0 flex flex-col items-center justify-center">
-                        <span className="text-4xl font-bold text-gray-900">{score}</span>
-                        <span className="text-sm text-gray-500">{label}</span>
-                    </div>
-                </div>
-            );
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // ============== AI PLATFORM LOGOS (Official Brand Colors) ==============
+        const AILogos = {
+            chatgpt: 'https://upload.wikimedia.org/wikipedia/commons/0/04/ChatGPT_logo.svg',
+            perplexity: 'https://uxwing.com/wp-content/themes/uxwing/download/brands-and-social-media/perplexity-ai-icon.png',
+            claude: 'https://upload.wikimedia.org/wikipedia/commons/8/8a/Claude_AI_logo.svg',
+            gemini: 'https://upload.wikimedia.org/wikipedia/commons/8/8a/Google_Gemini_logo.svg'
         };
-        
-        // Blurred/Locked Section
-        const LockedSection = ({ title, children, onUnlock }) => (
-            <div className="relative rounded-2xl border border-gray-200 bg-white p-6 overflow-hidden">
-                <div className="blur-content">{children}</div>
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/80 backdrop-blur-sm">
-                    <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-600 mb-3">
-                        <LockIcon size={24}/>
-                    </div>
-                    <h4 className="font-semibold text-gray-900 mb-1">{title}</h4>
-                    <p className="text-sm text-gray-500 mb-4">Unlock with full report</p>
-                    <button onClick={onUnlock} className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition">
-                        Unlock Now
-                    </button>
-                </div>
-            </div>
-        );
-        
-        // ============== PAGES ==============
-        
-        // Login Page
-        const LoginPage = ({ onLogin }) => {
-            const [name, setName] = useState('');
-            const [email, setEmail] = useState('');
-            const [loading, setLoading] = useState(false);
-            
-            const handleSubmit = async (e) => {
-                e.preventDefault();
-                setLoading(true);
-                try {
-                    const res = await fetch('/api/auth/login', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name, email })
-                    });
-                    const data = await res.json();
-                    if (data.success) onLogin(data.user);
-                } catch (err) {
-                    alert('Login failed');
-                }
-                setLoading(false);
-            };
-            
-            return (
-                <div className="min-h-screen flex">
-                    {/* Left - Form */}
-                    <div className="flex-1 flex items-center justify-center p-8">
-                        <div className="w-full max-w-md">
-                            <div className="mb-8">
-                                <h1 className="text-2xl font-bold text-gray-900 mb-2">Welcome to Vieweo</h1>
-                                <p className="text-gray-600">Check your AI visibility score and see how often AI platforms recommend you.</p>
-                            </div>
-                            
-                            <form onSubmit={handleSubmit} className="space-y-4">
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Your Name</label>
-                                    <input type="text" value={name} onChange={e => setName(e.target.value)} required
-                                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                        placeholder="John Smith"/>
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
-                                    <input type="email" value={email} onChange={e => setEmail(e.target.value)} required
-                                        className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                        placeholder="john@example.com"/>
-                                </div>
-                                <button type="submit" disabled={loading}
-                                    className="w-full py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition disabled:opacity-50">
-                                    {loading ? 'Please wait...' : 'Check My AI Visibility'}
-                                </button>
-                            </form>
-                            
-                            <p className="mt-6 text-center text-sm text-gray-500">
-                                Used by agents competing for visibility on ChatGPT, Gemini, and Perplexity.
-                            </p>
-                        </div>
-                    </div>
-                    
-                    {/* Right - Hero */}
-                    <div className="hidden lg:flex flex-1 bg-gradient-to-br from-slate-900 to-slate-800 relative overflow-hidden">
-                        <img src="https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=1200" 
-                            className="absolute inset-0 w-full h-full object-cover opacity-40"/>
-                        <div className="relative z-10 p-12 flex flex-col justify-center">
-                            <h2 className="text-4xl lg:text-5xl font-bold text-white leading-tight mb-6">
-                                Be the Agent<br/>AI Recommends.
-                            </h2>
-                            <p className="text-xl text-gray-300 mb-8">
-                                Vieweo measures how often AI platforms recommend you as the best agent in your market.
-                            </p>
-                            
-                            <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 border border-white/20">
-                                <h3 className="text-lg font-semibold text-white mb-4">Why GEO Matters for Real Estate</h3>
-                                <ul className="space-y-3 text-gray-300 text-sm">
-                                    <li className="flex items-start gap-3">
-                                        <span className="text-blue-400 mt-1">→</span>
-                                        <span>Buyers now ask AI: "Who's the best agent in Rittenhouse?"</span>
-                                    </li>
-                                    <li className="flex items-start gap-3">
-                                        <span className="text-blue-400 mt-1">→</span>
-                                        <span>AI platforms answer directly — with only 1 or 2 names</span>
-                                    </li>
-                                    <li className="flex items-start gap-3">
-                                        <span className="text-blue-400 mt-1">→</span>
-                                        <span>If AI can't recognize you, it won't recommend you</span>
-                                    </li>
-                                    <li className="flex items-start gap-3">
-                                        <span className="text-blue-400 mt-1">→</span>
-                                        <span>GEO = Generative Engine Optimization for AI visibility</span>
-                                    </li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
+
+        // ============== REAL ESTATE IMAGES ==============
+        const RealEstateImages = {
+            hero: 'https://images.unsplash.com/photo-1560518883-ce09059eeffa?w=1920&q=80',
+            luxury: 'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=800&q=80',
+            suburban: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=800&q=80',
+            modern: 'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?w=800&q=80',
+            agent: 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=400&q=80',
+            office: 'https://images.unsplash.com/photo-1497366216548-37526070297c?w=1200&q=80',
+            neighborhood: 'https://images.unsplash.com/photo-1448630360428-65456885c650?w=1200&q=80',
+            sold: 'https://images.unsplash.com/photo-1582407947304-fd86f028f716?w=800&q=80'
         };
-        
-        // Search Page (after login)
-        const SearchPage = ({ user, onSearch }) => {
-            const [query, setQuery] = useState('');
-            const [suggestions, setSuggestions] = useState([]);
-            
+
+        // ============== LOADING COMPONENT ==============
+        const LoadingScreen = ({ title = "Analyzing", subtitle = "AI processing in progress" }) => {
+            const [dots, setDots] = useState('');
+            const [stepIndex, setStepIndex] = useState(0);
+
+            const steps = [
+                "Searching database",
+                "Loading agent profile",
+                "Calculating visibility scores",
+                "Analyzing market position",
+                "Computing SALT metrics",
+                "Generating insights",
+                "Finalizing analysis"
+            ];
+
             useEffect(() => {
-                if (query.length > 2) {
-                    fetch(`/api/search?q=${encodeURIComponent(query)}`)
-                        .then(r => r.json())
-                        .then(d => setSuggestions(d.results || []))
-                        .catch(() => setSuggestions([]));
-                } else {
-                    setSuggestions([]);
-                }
-            }, [query]);
-            
+                const dotsTimer = setInterval(() => {
+                    setDots(prev => prev.length >= 3 ? '' : prev + '.');
+                }, 400);
+
+                const stepTimer = setInterval(() => {
+                    setStepIndex(prev => (prev + 1) % steps.length);
+                }, 1800);
+
+                return () => {
+                    clearInterval(dotsTimer);
+                    clearInterval(stepTimer);
+                };
+            }, []);
+
             return (
-                <div className="min-h-screen">
-                    {/* Hero Section */}
-                    <div className="relative bg-gradient-to-br from-slate-900 to-slate-800 overflow-hidden">
-                        <img src="https://images.unsplash.com/photo-1449824913935-59a10b8d2000?w=1600" 
-                            className="absolute inset-0 w-full h-full object-cover opacity-30"/>
-                        <div className="relative z-10 max-w-6xl mx-auto px-6 py-20">
-                            <div className="text-center mb-10">
-                                <h1 className="text-4xl lg:text-5xl font-bold text-white mb-4">
-                                    Be the Agent AI Recommends.
-                                </h1>
-                                <p className="text-xl text-gray-300 max-w-2xl mx-auto">
-                                    Vieweo measures and improves how often AI platforms recommend you as the best agent in your market.
-                                </p>
-                            </div>
-                            
-                            {/* Search Box */}
-                            <div className="max-w-2xl mx-auto relative">
-                                <div className="flex items-center bg-white rounded-2xl shadow-2xl overflow-hidden">
-                                    <div className="pl-6 text-gray-400">
-                                        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                                        </svg>
-                                    </div>
-                                    <input type="text" value={query} onChange={e => setQuery(e.target.value)}
-                                        placeholder="Philadelphia, Rittenhouse, 19103..."
-                                        className="flex-1 px-4 py-5 text-lg focus:outline-none"/>
-                                    <button onClick={() => query && onSearch(query)}
-                                        className="m-2 px-6 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition">
-                                        Check Agent Visibility
-                                    </button>
-                                </div>
-                                
-                                {suggestions.length > 0 && (
-                                    <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-xl shadow-xl border border-gray-100 overflow-hidden z-20">
-                                        {suggestions.map(s => (
-                                            <button key={s.id} onClick={() => onSearch(s.name)}
-                                                className="w-full px-6 py-4 text-left hover:bg-gray-50 flex items-center gap-4 border-b border-gray-100 last:border-0">
-                                                <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-semibold">
-                                                    {s.name[0]}
-                                                </div>
-                                                <div>
-                                                    <div className="font-medium text-gray-900">{s.name}</div>
-                                                    <div className="text-sm text-gray-500">{s.city}, {s.state}</div>
-                                                </div>
-                                            </button>
-                                        ))}
-                                    </div>
-                                )}
-                                
-                                <p className="text-center text-gray-400 text-sm mt-4">
-                                    Used by agents competing for visibility on ChatGPT, Gemini, and Perplexity.
-                                </p>
-                            </div>
-                        </div>
+                <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 flex items-center justify-center p-6 relative overflow-hidden">
+                    {/* Animated background */}
+                    <div className="absolute inset-0 overflow-hidden">
+                        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl animate-pulse" style={{animationDuration: '4s'}}/>
+                        <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl animate-pulse" style={{animationDuration: '6s', animationDelay: '1s'}}/>
                     </div>
-                    
-                    {/* Why GEO Section */}
-                    <div className="max-w-6xl mx-auto px-6 py-16">
-                        <h2 className="text-3xl font-bold text-center text-gray-900 mb-4">
-                            Why GEO Matters for Real Estate Agents
-                        </h2>
-                        <p className="text-center text-gray-600 max-w-3xl mx-auto mb-12">
-                            Search is changing. Buyers are no longer scrolling through pages of links — they're asking AI who the best agent is in their neighborhood.
-                        </p>
-                        
-                        <div className="grid md:grid-cols-3 gap-8">
-                            <div className="bg-white rounded-2xl p-8 border border-gray-200">
-                                <div className="w-14 h-14 bg-blue-100 rounded-2xl flex items-center justify-center mb-6">
-                                    <svg className="w-7 h-7 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/>
-                                    </svg>
-                                </div>
-                                <h3 className="text-lg font-semibold text-gray-900 mb-2">The Shift</h3>
-                                <p className="text-sm font-medium text-gray-700 mb-3">From Search Results → AI Answers</p>
-                                <ul className="space-y-2 text-sm text-gray-600">
-                                    <li>• Buyers ask: "Who's the best agent in Rittenhouse?"</li>
-                                    <li>• AI platforms answer directly — with one or two names</li>
-                                </ul>
-                            </div>
-                            
-                            <div className="bg-white rounded-2xl p-8 border border-gray-200">
-                                <div className="w-14 h-14 bg-amber-100 rounded-2xl flex items-center justify-center mb-6">
-                                    <svg className="w-7 h-7 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                                    </svg>
-                                </div>
-                                <h3 className="text-lg font-semibold text-gray-900 mb-2">The Problem</h3>
-                                <p className="text-sm font-medium text-gray-700 mb-3">Most Agents Are Invisible to AI</p>
-                                <ul className="space-y-2 text-sm text-gray-600">
-                                    <li>• Have inconsistent online signals</li>
-                                    <li>• Strong on Zillow but weak in AI models</li>
-                                    <li>• Don't show up across ChatGPT, Gemini, or Perplexity</li>
-                                </ul>
-                            </div>
-                            
-                            <div className="bg-white rounded-2xl p-8 border border-gray-200">
-                                <div className="w-14 h-14 bg-emerald-100 rounded-2xl flex items-center justify-center mb-6">
-                                    <svg className="w-7 h-7 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                                    </svg>
-                                </div>
-                                <h3 className="text-lg font-semibold text-gray-900 mb-2">The Solution</h3>
-                                <p className="text-sm font-medium text-gray-700 mb-3">Vieweo = GEO for Real Estate</p>
-                                <ul className="space-y-2 text-sm text-gray-600">
-                                    <li>• How AI models understand your name & expertise</li>
-                                    <li>• How often you're recommended vs. competitors</li>
-                                    <li>• What signals are missing or weakening visibility</li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    {/* How It Works */}
-                    <div className="bg-slate-900 py-16">
-                        <div className="max-w-6xl mx-auto px-6">
-                            <h2 className="text-2xl font-bold text-center text-white mb-12">How Vieweo Works</h2>
-                            <div className="flex items-center justify-center gap-4 flex-wrap">
-                                {[
-                                    { icon: '🔍', label: 'Search a location' },
-                                    { icon: '📊', label: 'See ranked agents by AI visibility' },
-                                    { icon: '📈', label: 'View your VEO Score' },
-                                    { icon: '✅', label: 'Get clear actions to improve' }
-                                ].map((step, i) => (
-                                    <React.Fragment key={i}>
-                                        <div className="flex flex-col items-center gap-2">
-                                            <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center text-2xl">
-                                                {step.icon}
-                                            </div>
-                                            <span className="text-sm text-gray-400 text-center">{step.label}</span>
-                                        </div>
-                                        {i < 3 && <span className="text-gray-600 text-2xl">→</span>}
-                                    </React.Fragment>
-                                ))}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
-        };
-        
-        // Free Snapshot Page (blurred sections)
-        const SnapshotPage = ({ agentName, user, onUpgrade, onBack }) => {
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(true);
-            
-            useEffect(() => {
-                fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
-                    .then(r => r.json())
-                    .then(d => { setData(d); setLoading(false); })
-                    .catch(() => setLoading(false));
-            }, [agentName]);
-            
-            if (loading) return (
-                <div className="min-h-screen flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"/>
-                        <p className="text-gray-600">Analyzing AI visibility...</p>
-                    </div>
-                </div>
-            );
-            
-            if (!data || data.error) return (
-                <div className="min-h-screen flex items-center justify-center">
-                    <div className="text-center">
-                        <p className="text-red-600 mb-4">{data?.error || 'Agent not found'}</p>
-                        <button onClick={onBack} className="text-blue-600 hover:underline">← Back to search</button>
-                    </div>
-                </div>
-            );
-            
-            return (
-                <div className="min-h-screen bg-gray-50">
-                    {/* Header */}
-                    <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
-                        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-                            <button onClick={onBack} className="text-gray-600 hover:text-gray-900 flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
-                                </svg>
-                                Back
-                            </button>
-                            <div className="flex items-center gap-2">
-                                <span className="text-sm text-gray-500">Logged in as</span>
-                                <span className="font-medium text-gray-900">{user.name}</span>
-                            </div>
-                        </div>
-                    </header>
-                    
-                    <main className="max-w-6xl mx-auto px-6 py-8">
-                        {/* Agent Header */}
-                        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-8 animate-in">
-                            <div className="flex flex-col lg:flex-row items-center gap-8">
-                                <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl flex items-center justify-center text-white text-3xl font-bold shadow-lg">
-                                    {data.agent.name.split(' ').map(n => n[0]).join('')}
-                                </div>
-                                <div className="flex-1 text-center lg:text-left">
-                                    <h1 className="text-2xl font-bold text-gray-900 mb-1">{data.agent.name}</h1>
-                                    <p className="text-gray-600">{data.agent.brokerage}</p>
-                                    <p className="text-gray-500 text-sm">{data.agent.city}, {data.agent.state}</p>
-                                </div>
-                                <ScoreRing score={data.visibility_score} label="AI Visibility"/>
-                            </div>
-                        </div>
-                        
-                        {/* Free Metrics */}
-                        <div className="grid md:grid-cols-3 gap-6 mb-8">
-                            <div className="bg-white rounded-2xl p-6 border border-gray-200 animate-in" style={{animationDelay: '0.1s'}}>
-                                <h3 className="text-sm font-medium text-gray-500 mb-2">Visibility Tier</h3>
-                                <p className="text-2xl font-bold text-gray-900">{data.visibility_tier}</p>
-                                <p className="text-sm text-gray-500 mt-1">Grade: {data.visibility_grade}</p>
-                            </div>
-                            <div className="bg-white rounded-2xl p-6 border border-gray-200 animate-in" style={{animationDelay: '0.2s'}}>
-                                <h3 className="text-sm font-medium text-gray-500 mb-2">Market Presence</h3>
-                                <p className="text-2xl font-bold text-gray-900">{data.market_presence}</p>
-                                <p className="text-sm text-gray-500 mt-1">In your local market</p>
-                            </div>
-                            <div className="bg-white rounded-2xl p-6 border border-gray-200 animate-in" style={{animationDelay: '0.3s'}}>
-                                <h3 className="text-sm font-medium text-gray-500 mb-2">AI Discoverability</h3>
-                                <p className="text-2xl font-bold text-gray-900">{data.ai_discoverability}</p>
-                                <p className="text-sm text-gray-500 mt-1">Across AI platforms</p>
-                            </div>
-                        </div>
-                        
-                        {/* Teaser Ranking */}
-                        <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-2xl p-6 mb-8 text-white animate-in" style={{animationDelay: '0.4s'}}>
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <p className="text-blue-200 text-sm mb-1">Your Ranking Preview</p>
-                                    <p className="text-2xl font-bold">{data.ranking_teaser}</p>
-                                </div>
-                                <button onClick={onUpgrade} className="px-6 py-3 bg-white text-blue-600 font-semibold rounded-xl hover:bg-blue-50 transition">
-                                    See Full Leaderboard
-                                </button>
-                            </div>
-                        </div>
-                        
-                        {/* Locked Sections */}
-                        <div className="grid md:grid-cols-2 gap-6 mb-8">
-                            <LockedSection title="Competitor Analysis" onUnlock={onUpgrade}>
-                                <div className="space-y-4">
-                                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                        <div className="w-10 h-10 bg-gray-200 rounded-full"/>
-                                        <div className="flex-1"><div className="h-4 bg-gray-200 rounded w-3/4"/></div>
-                                        <div className="h-6 w-16 bg-gray-200 rounded"/>
-                                    </div>
-                                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                        <div className="w-10 h-10 bg-gray-200 rounded-full"/>
-                                        <div className="flex-1"><div className="h-4 bg-gray-200 rounded w-2/3"/></div>
-                                        <div className="h-6 w-16 bg-gray-200 rounded"/>
-                                    </div>
-                                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                                        <div className="w-10 h-10 bg-gray-200 rounded-full"/>
-                                        <div className="flex-1"><div className="h-4 bg-gray-200 rounded w-4/5"/></div>
-                                        <div className="h-6 w-16 bg-gray-200 rounded"/>
-                                    </div>
-                                </div>
-                            </LockedSection>
-                            
-                            <LockedSection title="SALT Score Breakdown" onUnlock={onUpgrade}>
-                                <div className="space-y-4">
-                                    <div><div className="flex justify-between mb-1"><span>Semantic</span><span>--</span></div><div className="h-2 bg-gray-200 rounded-full"/></div>
-                                    <div><div className="flex justify-between mb-1"><span>Authority</span><span>--</span></div><div className="h-2 bg-gray-200 rounded-full"/></div>
-                                    <div><div className="flex justify-between mb-1"><span>Location</span><span>--</span></div><div className="h-2 bg-gray-200 rounded-full"/></div>
-                                    <div><div className="flex justify-between mb-1"><span>Trust</span><span>--</span></div><div className="h-2 bg-gray-200 rounded-full"/></div>
-                                </div>
-                            </LockedSection>
-                        </div>
-                        
-                        {/* CTA */}
-                        <div className="mt-16 text-center animate-in" style={{animationDelay: '0.5s'}}>
-                            <h3 className="text-xl font-bold text-gray-900 mb-2">Unlock Your Full AI Visibility Report</h3>
-                            <p className="text-gray-600 mb-6">Get detailed SALT scores, competitor analysis, and actionable GEO improvements.</p>
-                            <button onClick={onUpgrade} className="px-8 py-4 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition text-lg shadow-lg shadow-blue-600/25">
-                                Unlock Full Report — $49
-                            </button>
-                            <p className="text-sm text-gray-500 mt-3">One-time payment. 3-page detailed report.</p>
-                        </div>
-                    </main>
-                </div>
-            );
-        };
-        
-        // Paywall Page
-        const PaywallPage = ({ agentName, user, onPaymentSuccess, onBack }) => {
-            const [processing, setProcessing] = useState(false);
-            
-            const handlePayment = async () => {
-                setProcessing(true);
-                // Simulate payment
-                await new Promise(r => setTimeout(r, 1500));
-                try {
-                    const res = await fetch('/api/auth/upgrade', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.success) onPaymentSuccess(data.user);
-                } catch (err) {
-                    alert('Payment failed');
-                }
-                setProcessing(false);
-            };
-            
-            return (
-                <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
-                    <div className="max-w-lg w-full">
-                        <button onClick={onBack} className="text-gray-600 hover:text-gray-900 mb-8 flex items-center gap-2">
-                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
-                            </svg>
-                            Back
-                        </button>
-                        
-                        <div className="bg-white rounded-3xl p-8 shadow-xl border border-gray-100">
-                            <div className="text-center mb-8">
-                                <div className="w-16 h-16 bg-blue-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                                    <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                                    </svg>
-                                </div>
-                                <h2 className="text-2xl font-bold text-gray-900 mb-2">Unlock Full GEO Report</h2>
-                                <p className="text-gray-600">One-time AI Visibility Report (3 Pages)</p>
-                            </div>
-                            
-                            <div className="bg-gray-50 rounded-2xl p-6 mb-6">
-                                <div className="flex items-baseline justify-center gap-1 mb-4">
-                                    <span className="text-4xl font-bold text-gray-900">$49</span>
-                                    <span className="text-gray-500">one-time</span>
-                                </div>
-                                
-                                <ul className="space-y-3">
-                                    {[
-                                        'Page 1: Visibility Snapshot (Overall Score & Benchmarks)',
-                                        'Page 2: SALT Deep Dive (Gaps & Risks)',
-                                        'Page 3: Actionable Intelligence (5 Quick Wins)'
-                                    ].map((item, i) => (
-                                        <li key={i} className="flex items-start gap-3 text-sm">
-                                            <svg className="w-5 h-5 text-emerald-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                            </svg>
-                                            <span className="text-gray-700">{item}</span>
-                                        </li>
-                                    ))}
-                                </ul>
-                            </div>
-                            
-                            <div className="space-y-3 mb-6 text-sm text-gray-600">
-                                <div className="flex items-center gap-2">
-                                    <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                    </svg>
-                                    Full leaderboard access
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                    </svg>
-                                    Competitor comparison
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                    </svg>
-                                    Detailed GEO signals
-                                </div>
-                            </div>
-                            
-                            <button onClick={handlePayment} disabled={processing}
-                                className="w-full py-4 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition disabled:opacity-50">
-                                {processing ? 'Processing...' : 'Complete Purchase'}
-                            </button>
-                            
-                            <p className="text-center text-xs text-gray-500 mt-4">
-                                Secure payment. Instant access to your report.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            );
-        };
-        
-        // Full Report Page (after payment)
-        const FullReportPage = ({ agentName, user, onBack }) => {
-            const [data, setData] = useState(null);
-            const [loading, setLoading] = useState(true);
-            
-            useEffect(() => {
-                fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
-                    .then(r => r.json())
-                    .then(d => { setData(d); setLoading(false); })
-                    .catch(() => setLoading(false));
-            }, [agentName]);
-            
-            if (loading) return (
-                <div className="min-h-screen flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"/>
-                        <p className="text-gray-600">Generating your full report...</p>
-                    </div>
-                </div>
-            );
-            
-            if (!data || data.error) return (
-                <div className="min-h-screen flex items-center justify-center">
-                    <p className="text-red-600">{data?.error || 'Error loading report'}</p>
-                </div>
-            );
-            
-            const agent = data.agent;
-            const analysis = data.analysis;
-            const scores = analysis.scores;
-            
-            return (
-                <div className="min-h-screen bg-gray-50">
-                    <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
-                        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-                            <button onClick={onBack} className="text-gray-600 hover:text-gray-900 flex items-center gap-2">
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
-                                </svg>
-                                Back
-                            </button>
-                            <span className="px-3 py-1 bg-emerald-100 text-emerald-700 text-sm font-medium rounded-full">
-                                ✓ Full Report Unlocked
-                            </span>
-                        </div>
-                    </header>
-                    
-                    <main className="max-w-6xl mx-auto px-6 py-8">
-                        {/* Report Header */}
-                        <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-3xl p-8 text-white mb-8">
-                            <div className="flex flex-col lg:flex-row items-center gap-8">
-                                <div className="w-24 h-24 bg-white/20 rounded-2xl flex items-center justify-center text-3xl font-bold">
-                                    {agent.name.split(' ').map(n => n[0]).join('')}
-                                </div>
-                                <div className="flex-1 text-center lg:text-left">
-                                    <p className="text-blue-200 text-sm mb-1">AI Visibility Report</p>
-                                    <h1 className="text-3xl font-bold mb-2">{agent.name}</h1>
-                                    <p className="text-blue-100">{agent.brokerage} • {agent.location?.city}, {agent.location?.state}</p>
-                                </div>
-                                <div className="text-center">
-                                    <div className="text-5xl font-bold mb-1">{scores.overall.score}</div>
-                                    <div className="text-blue-200">Overall Score</div>
-                                    <div className="mt-2 px-4 py-1 bg-white/20 rounded-full text-sm">
-                                        {scores.overall.tier} Tier
-                                    </div>
+
+                    <div className="relative z-10 text-center max-w-2xl w-full">
+                        {/* Dual spinner */}
+                        <div className="mb-8 relative">
+                            <div className="w-24 h-24 mx-auto relative">
+                                <div className="absolute inset-0 border-4 border-blue-500/20 rounded-full"/>
+                                <div className="absolute inset-0 border-4 border-transparent border-t-blue-500 rounded-full animate-spin" style={{animationDuration: '1s'}}/>
+                                <div className="absolute inset-2 border-4 border-transparent border-t-purple-400 rounded-full animate-spin" style={{animationDuration: '1.5s', animationDirection: 'reverse'}}/>
+                                <div className="absolute inset-0 flex items-center justify-center">
+                                    <div className="w-3 h-3 bg-blue-400 rounded-full animate-pulse"/>
                                 </div>
                             </div>
                         </div>
-                        
-                        {/* Page 1: Visibility Snapshot */}
-                        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-8">
-                            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                                <span className="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-sm font-bold">1</span>
-                                Visibility Snapshot
-                            </h2>
-                            
-                            <div className="grid md:grid-cols-4 gap-4 mb-8">
-                                {[
-                                    { label: 'Authority', score: scores.authority?.score, grade: scores.authority?.grade },
-                                    { label: 'Sentiment', score: scores.sentiment?.score, grade: scores.sentiment?.grade },
-                                    { label: 'Trust', score: scores.trustworthiness?.score, grade: scores.trustworthiness?.grade },
-                                    { label: 'Location', score: scores.location_visibility?.score, grade: scores.location_visibility?.grade }
-                                ].map((item, i) => (
-                                    <div key={i} className="bg-gray-50 rounded-xl p-4 text-center">
-                                        <div className="text-3xl font-bold text-gray-900 mb-1">{item.score || 0}</div>
-                                        <div className="text-sm text-gray-500 mb-2">{item.label}</div>
-                                        <span className={`px-2 py-1 text-xs font-semibold rounded ${
-                                            item.grade?.startsWith('A') ? 'bg-emerald-100 text-emerald-700' :
-                                            item.grade?.startsWith('B') ? 'bg-blue-100 text-blue-700' :
-                                            'bg-amber-100 text-amber-700'
-                                        }`}>{item.grade}</span>
-                                    </div>
-                                ))}
-                            </div>
-                            
-                            {/* Leaderboard Position */}
-                            {data.leaderboard_context && (
-                                <div className="bg-blue-50 rounded-xl p-6">
-                                    <h3 className="font-semibold text-gray-900 mb-4">Your Leaderboard Position</h3>
-                                    <div className="grid md:grid-cols-3 gap-4">
-                                        <div className="text-center">
-                                            <div className="text-2xl font-bold text-blue-600">#{data.leaderboard_context.state_rank}</div>
-                                            <div className="text-sm text-gray-600">in {agent.location?.state} ({data.leaderboard_context.state_total} agents)</div>
-                                        </div>
-                                        <div className="text-center">
-                                            <div className="text-2xl font-bold text-blue-600">#{data.leaderboard_context.city_rank}</div>
-                                            <div className="text-sm text-gray-600">in {agent.location?.city} ({data.leaderboard_context.city_total} agents)</div>
-                                        </div>
-                                        <div className="text-center">
-                                            <div className="text-2xl font-bold text-blue-600">Top {data.leaderboard_context.percentile}%</div>
-                                            <div className="text-sm text-gray-600">Nationally</div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                        
-                        {/* Page 2: Deep Dive */}
-                        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-8">
-                            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                                <span className="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-sm font-bold">2</span>
-                                SALT Deep Dive (Gaps & Risks)
-                            </h2>
-                            
-                            <div className="grid md:grid-cols-2 gap-6">
-                                {['authority', 'sentiment', 'trustworthiness', 'location_visibility'].map(key => {
-                                    const score = scores[key];
-                                    if (!score) return null;
+
+                        <h2 className="text-3xl font-bold text-white mb-3">{title}{dots}</h2>
+                        <p className="text-blue-200/60 text-lg mb-8">{subtitle}</p>
+
+                        {/* Progress steps */}
+                        <div className="bg-slate-900/40 backdrop-blur-sm border border-slate-700/50 rounded-2xl p-6 shadow-2xl">
+                            <div className="space-y-3">
+                                {steps.map((step, idx) => {
+                                    const isPast = idx < stepIndex;
+                                    const isCurrent = idx === stepIndex;
                                     return (
-                                        <div key={key} className="border border-gray-200 rounded-xl p-6">
-                                            <div className="flex items-center justify-between mb-4">
-                                                <h3 className="font-semibold text-gray-900 capitalize">{key.replace('_', ' ')}</h3>
-                                                <span className={`px-3 py-1 text-sm font-semibold rounded-full ${
-                                                    score.grade?.startsWith('A') ? 'bg-emerald-100 text-emerald-700' :
-                                                    score.grade?.startsWith('B') ? 'bg-blue-100 text-blue-700' :
-                                                    'bg-amber-100 text-amber-700'
-                                                }`}>{score.score} / {score.grade}</span>
+                                        <div key={idx} className="flex items-center gap-3 transition-all duration-500">
+                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center transition-all duration-500 ${
+                                                isPast ? 'bg-green-500/20 border-2 border-green-500' :
+                                                isCurrent ? 'bg-blue-500/20 border-2 border-blue-500 animate-pulse' :
+                                                'bg-slate-700/20 border-2 border-slate-600'
+                                            }`}>
+                                                {isPast && <svg className="w-3 h-3 text-green-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>}
+                                                {isCurrent && <div className="w-2 h-2 bg-blue-400 rounded-full animate-ping"/>}
                                             </div>
-                                            <div className="h-2 bg-gray-100 rounded-full mb-4 overflow-hidden">
-                                                <div className="h-full bg-blue-600 rounded-full" style={{width: `${score.score}%`}}/>
-                                            </div>
-                                            <ul className="space-y-2">
-                                                {score.factors?.slice(0, 4).map((f, i) => (
-                                                    <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                        <svg className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                                        </svg>
-                                                        {f}
-                                                    </li>
-                                                ))}
-                                            </ul>
+                                            <span className={`text-sm transition-all duration-500 ${
+                                                isPast ? 'text-green-400/60' :
+                                                isCurrent ? 'text-blue-300 font-medium' :
+                                                'text-slate-500'
+                                            }`}>
+                                                {step}{isCurrent ? dots : ''}
+                                            </span>
                                         </div>
                                     );
                                 })}
                             </div>
                         </div>
-                        
-                        {/* Critical Issues & Red Flags */}
-                        {analysis.actionable_insights?.geo_weaknesses && analysis.actionable_insights.geo_weaknesses.length > 0 && (
-                            <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-6 mb-8">
-                                <h2 className="text-xl font-bold text-red-900 mb-4 flex items-center gap-2">
-                                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4v2m0 4v2m-6-4a2 2 0 11-4 0 2 2 0 014 0zM7 20a7 7 0 1114 0M12 13a3 3 0 11-6 0 3 3 0 016 0z"/>
-                                    </svg>
-                                    Critical GEO Visibility Issues
-                                </h2>
-                                <p className="text-sm text-red-800 mb-4">These gaps are preventing AI discovery and should be addressed immediately:</p>
-                                <ul className="space-y-3">
-                                    {analysis.actionable_insights.geo_weaknesses.map((w, i) => (
-                                        <li key={i} className="flex items-start gap-3 text-sm text-red-900">
-                                            <span className="inline-block w-5 h-5 bg-red-600 text-white rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold">{i+1}</span>
-                                            <span>{w}</span>
+
+                        <p className="text-slate-500 text-xs mt-6 animate-pulse">Powered by Vieweo</p>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============== FOOTER SECTION WITH IMAGE ==============
+        const FooterSection = () => {
+            return (
+                <>
+                    {/* Industry News Section */}
+                    <div className="bg-gray-50 py-16">
+                        <div className="max-w-4xl mx-auto px-6">
+                            <h2 className="text-2xl font-bold text-gray-900 mb-3 text-center">AI is Transforming Real Estate</h2>
+                            <p className="text-gray-600 text-center mb-8">Stay ahead of the curve with the latest industry insights</p>
+                            <div className="bg-white rounded-xl shadow-lg overflow-hidden hover-lift">
+                                <img
+                                    src="/images/Section.png"
+                                    alt="Survey: 82% of Americans Use AI for Housing Market Information"
+                                    className="w-full h-auto"
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Footer */}
+                    <footer className="bg-gray-900 text-white py-12">
+                        <div className="max-w-6xl mx-auto px-6">
+                            <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                                <div className="flex items-center gap-2">
+                                    <img src="/images/ViewoLogo.PNG" alt="Vieweo" className="h-8 w-auto" />
+                                </div>
+                                <p className="text-gray-400 text-sm">© 2026 Vieweo. AI Visibility Platform for Real Estate Professionals.</p>
+                            </div>
+                        </div>
+                    </footer>
+                </>
+            );
+        };
+
+        // ============== LOGIN MODAL ==============
+        const LoginModal = ({ show, onClose, onSuccess }) => {
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            if (!show) return null;
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError('');
+
+                const formData = new FormData(e.target);
+                const firstName = formData.get('first_name');
+                const lastName = formData.get('last_name');
+                const email = formData.get('email');
+
+                try {
+                    const r = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: `${firstName} ${lastName}`, email })
+                    });
+
+                    const d = await r.json();
+
+                    if (d.success) {
+                        onSuccess(d.user);
+                        onClose();
+                    } else {
+                        setError(d.error || 'Login failed');
+                    }
+                } catch (err) {
+                    setError('Network error. Please try again.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in">
+                    <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 relative animate-in">
+                        <button
+                            onClick={onClose}
+                            className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100 transition"
+                        >
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                        </button>
+
+                        <div className="text-center mb-6">
+                            <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/>
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-900 mb-1">Welcome to Vieweo</h3>
+                            <p className="text-sm text-gray-500">Access SALT scores and detailed insights</p>
+                        </div>
+
+                        {error && (
+                            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
+                                {error}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">First Name</label>
+                                    <input
+                                        name="first_name"
+                                        type="text"
+                                        required
+                                        className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                                        placeholder="John"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Last Name</label>
+                                    <input
+                                        name="last_name"
+                                        type="text"
+                                        required
+                                        className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                                        placeholder="Smith"
+                                    />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-gray-700 mb-1">Email</label>
+                                <input
+                                    name="email"
+                                    type="email"
+                                    required
+                                    className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                                    placeholder="john@example.com"
+                                />
+                            </div>
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-purple-700 transition shadow-lg shadow-blue-500/30 disabled:opacity-50"
+                            >
+                                {loading ? 'Signing In...' : 'Sign In'}
+                            </button>
+                        </form>
+
+                        <p className="text-xs text-gray-500 text-center mt-4">
+                            Test with admin@vieweo.com for full access
+                        </p>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============== ADD AGENT MODAL ==============
+        const AddAgentModal = ({ show, onClose, onSuccess }) => {
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [successData, setSuccessData] = useState(null);
+
+            if (!show) return null;
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError('');
+                setSuccessData(null);
+
+                const formData = new FormData(e.target);
+                const data = {
+                    full_name: formData.get('full_name'),
+                    city: formData.get('city'),
+                    state: formData.get('state'),
+                    phone: formData.get('phone'),
+                    email: formData.get('email'),
+                    brokerage: formData.get('brokerage'),
+                    website: formData.get('website'),
+                    years_experience: parseInt(formData.get('years_experience')) || 0,
+                    specialization: formData.get('specialization')
+                };
+
+                try {
+                    const r = await fetch('/api/agents/add', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    const result = await r.json();
+
+                    if (result.success) {
+                        setSuccessData(result);
+                    } else {
+                        setError(result.error || 'Failed to add agent');
+                    }
+                } catch (err) {
+                    setError('Network error. Please try again.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleRefreshPage = () => {
+                window.location.reload();
+            };
+
+            const handleClose = () => {
+                setSuccessData(null);
+                setError('');
+                onClose();
+            };
+
+            // Success state UI
+            if (successData) {
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+                        <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-8 my-8 relative animate-in text-center">
+                            <div className="w-20 h-20 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-900 mb-2">Agent Added Successfully!</h3>
+                            <p className="text-gray-600 mb-2">{successData.agent_name} has been added to the database.</p>
+                            <p className="text-sm text-gray-500 mb-6">Please refresh the page to see the new agent in search suggestions.</p>
+                            <div className="space-y-3">
+                                <button
+                                    onClick={handleRefreshPage}
+                                    className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-semibold rounded-xl hover:from-emerald-700 hover:to-teal-700 transition shadow-lg shadow-emerald-500/30"
+                                >
+                                    Refresh Page Now
+                                </button>
+                                <button
+                                    onClick={handleClose}
+                                    className="w-full py-3 bg-gray-100 text-gray-700 font-semibold rounded-xl hover:bg-gray-200 transition"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm overflow-y-auto">
+                    <div className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-8 my-8 relative animate-in">
+                        <button
+                            onClick={handleClose}
+                            className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-100 transition"
+                        >
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                            </svg>
+                        </button>
+
+                        <div className="text-center mb-6">
+                            <div className="w-16 h-16 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4"/>
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold text-gray-900 mb-1">Add New Agent</h3>
+                            <p className="text-sm text-gray-500">Register a new agent to access AI Visibility scores</p>
+                        </div>
+
+                        {error && (
+                            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
+                                {error}
+                            </div>
+                        )}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-semibold text-gray-700 mb-1">Full Name *</label>
+                                <input name="full_name" type="text" required className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="John Smith"/>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">City *</label>
+                                    <input name="city" type="text" required className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="Los Angeles"/>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">State *</label>
+                                    <input name="state" type="text" required className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="CA"/>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Phone *</label>
+                                    <input name="phone" type="tel" required className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="(555) 123-4567"/>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Email</label>
+                                    <input name="email" type="email" className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="john@example.com"/>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-semibold text-gray-700 mb-1">Brokerage</label>
+                                <input name="brokerage" type="text" className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="Coldwell Banker"/>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Years of Experience</label>
+                                    <input name="years_experience" type="number" min="0" className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="5"/>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-700 mb-1">Specialization</label>
+                                    <input name="specialization" type="text" className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="Luxury Homes"/>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-semibold text-gray-700 mb-1">Website</label>
+                                <input name="website" type="url" className="w-full px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition" placeholder="https://www.example.com"/>
+                            </div>
+
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-semibold rounded-xl hover:from-emerald-700 hover:to-teal-700 transition shadow-lg shadow-emerald-500/30 disabled:opacity-50"
+                            >
+                                {loading ? 'Adding Agent...' : 'Add Agent'}
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============== NAVBAR ==============
+        const Navbar = ({ user, onLogin, onLogout, onAddAgent }) => (
+            <nav className="bg-white border-b border-gray-200 sticky top-0 z-40 card-shadow">
+                <div className="max-w-7xl mx-auto px-6">
+                    <div className="flex items-center justify-between h-16">
+                        {/* Logo */}
+                        <div className="flex items-center gap-8">
+                            <div className="flex items-center gap-2">
+                                <img src="/images/ViewoLogo.PNG" alt="Vieweo" className="h-8 w-auto" />
+                            </div>
+                            
+                            {/* Nav Links */}
+                            <div className="hidden md:flex items-center gap-6">
+                                <a href="#" className="text-sm font-medium text-gray-600 hover:text-[#006AFF] transition">For Agents</a>
+                                <a href="#" className="text-sm font-medium text-gray-600 hover:text-[#006AFF] transition">Pricing</a>
+                                <a href="#" className="text-sm font-medium text-gray-600 hover:text-[#006AFF] transition">Resources</a>
+                            </div>
+                        </div>
+
+                        {/* Right Side */}
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={onAddAgent}
+                                className="hidden sm:flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 hover:text-[#006AFF] hover:bg-blue-50 rounded-lg transition"
+                            >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/>
+                                </svg>
+                                Add Agent
+                            </button>
+
+                            {user ? (
+                                <div className="flex items-center gap-3">
+                                    {user.is_admin && (
+                                        <span className="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded">
+                                            ADMIN
+                                        </span>
+                                    )}
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 rounded-full">
+                                        <div className="w-6 h-6 bg-[#006AFF] rounded-full flex items-center justify-center text-white text-xs font-bold">
+                                            {user.name?.[0] || 'U'}
+                                        </div>
+                                        <span className="text-sm font-medium text-gray-700">{user.name?.split(' ')[0]}</span>
+                                    </div>
+                                    <button
+                                        onClick={onLogout}
+                                        className="text-sm font-medium text-gray-500 hover:text-gray-700 transition"
+                                    >
+                                        Logout
+                                    </button>
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={onLogin}
+                                    className="px-5 py-2 bg-[#006AFF] text-white text-sm font-semibold rounded-lg hover:bg-[#0051CC] transition"
+                                >
+                                    Sign In
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </nav>
+        );
+
+        // ============== SEARCH PAGE ==============
+        const SearchPage = ({ user, onSearch, onLogin, onLogout, onAddAgent }) => {
+            const [query, setQuery] = useState('');
+            const [suggestions, setSuggestions] = useState([]);
+            const [loading, setLoading] = useState(false);
+
+            useEffect(() => {
+                if (query.length >= 2) {
+                    setLoading(true);
+                    const timer = setTimeout(() => {
+                        fetch(`/api/search?q=${encodeURIComponent(query)}`)
+                            .then(r => r.json())
+                            .then(d => {
+                                setSuggestions(d.results || []);
+                                setLoading(false);
+                            })
+                            .catch(() => {
+                                setSuggestions([]);
+                                setLoading(false);
+                            });
+                    }, 150);
+                    return () => clearTimeout(timer);
+                } else {
+                    setSuggestions([]);
+                    setLoading(false);
+                }
+            }, [query]);
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    <Navbar user={user} onLogin={onLogin} onLogout={onLogout} onAddAgent={onAddAgent} />
+
+                    {/* Hero Section - Zillow Style */}
+                    <div className="relative pb-16">
+                        {/* Background with overlay */}
+                        <div className="absolute inset-0 overflow-hidden">
+                            <img
+                                src={RealEstateImages.hero}
+                                alt="Luxury real estate"
+                                className="w-full h-full object-cover"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-r from-[#1E3A5F]/95 via-[#1E3A5F]/80 to-transparent"/>
+                        </div>
+
+                        <div className="relative z-20 max-w-7xl mx-auto px-6 py-20 lg:py-28">
+                            <div className="max-w-2xl">
+                                <span className="inline-block px-3 py-1 bg-[#00D395]/20 text-[#00D395] text-sm font-semibold rounded-full mb-4">
+                                    Proprietary AI visibility engine
+                                </span>
+                                <h1 className="text-4xl lg:text-5xl font-bold text-white mb-4 leading-tight">
+                                    Real Estate you sell<br/>
+                                    <span className="text-[#006AFF]">AI visibility you own</span>
+                                </h1>
+                                <p className="text-lg text-gray-300 mb-8">
+                                    See how visible you are on <b>AI Search</b>.
+                                    Optimize your digital presence to capture more leads.
+                                </p>
+
+                                {/* Search Box - Clean Zillow Style */}
+                                <div className="relative z-30">
+                                    <div className="bg-white rounded-lg shadow-xl overflow-hidden">
+                                        <div className="flex items-center">
+                                            <div className="pl-4 text-gray-400">
+                                                {loading ? (
+                                                    <div className="w-5 h-5 border-2 border-[#006AFF] border-t-transparent rounded-full animate-spin"/>
+                                                ) : (
+                                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                                                    </svg>
+                                                )}
+                                            </div>
+                                            <input
+                                                type="text"
+                                                value={query}
+                                                onChange={e => setQuery(e.target.value)}
+                                                onKeyDown={e => {
+                                                    if (e.key === 'Enter' && query) {
+                                                        onSearch(query);
+                                                    }
+                                                }}
+                                                placeholder="Search by agent name, city, or state..."
+                                                className="flex-1 px-4 py-4 text-base focus:outline-none text-gray-900 placeholder-gray-400"
+                                            />
+                                            <button
+                                                onClick={() => query && onSearch(query)}
+                                                className="m-1.5 px-6 py-3 bg-[#006AFF] text-white font-semibold rounded-md hover:bg-[#0051CC] transition"
+                                            >
+                                                Check Visibility
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                {/* Suggestions Dropdown */}
+                                {suggestions.length > 0 && (
+                                    <div className="absolute top-full left-0 right-0 mt-1 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-50 max-h-80 overflow-y-auto">
+                                        {suggestions.map(s => (
+                                            <button
+                                                key={s.id}
+                                                onClick={() => onSearch(s.name)}
+                                                className="w-full px-4 py-3 text-left hover:bg-gray-50 flex items-center gap-3 border-b border-gray-100 last:border-0 transition"
+                                            >
+                                                <div className="w-10 h-10 bg-[#006AFF] text-white rounded-full flex items-center justify-center font-semibold text-sm">
+                                                    {s.name ? s.name.split(' ').map(n=>n[0]).join('') : '?'}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-medium text-gray-900">{s.name}</div>
+                                                    <div className="text-sm text-gray-500 flex items-center gap-1.5">
+                                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                                                        </svg>
+                                                        <span>{s.city}, {s.state}</span>
+                                                        {s.brokerage && (
+                                                            <>
+                                                                <span className="text-gray-300">•</span>
+                                                                <span className="text-[#006AFF] truncate max-w-[180px]">{s.brokerage}</span>
+                                                            </>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <svg className="w-4 h-4 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7"/>
+                                                </svg>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* AI Platforms Section */}
+                    <div className="relative z-10 bg-white border-y border-gray-200 py-12">
+                        <div className="max-w-6xl mx-auto px-6">
+                            <p className="text-center text-gray-500 text-sm mb-8">Optimize your visibility across leading AI platforms</p>
+                            <div className="flex flex-wrap justify-center items-center gap-12">
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.chatgpt} alt="ChatGPT" className="h-8" />
+                                    <span className="text-xs font-medium text-gray-600">ChatGPT</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.claude} alt="Claude" className="h-6" />
+                                    <span className="text-xs font-medium text-gray-600">Claude</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.perplexity} alt="Perplexity" className="h-8" />
+                                    <span className="text-xs font-medium text-gray-600">Perplexity</span>
+                                </div>
+                                <div className="flex flex-col items-center gap-2 opacity-60 hover:opacity-100 transition">
+                                    <img src={AILogos.gemini} alt="Gemini" className="h-7" />
+                                    <span className="text-xs font-medium text-gray-600">Gemini</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Features Section */}
+                    <div className="max-w-6xl mx-auto px-6 py-16">
+                        <div className="text-center mb-12">
+                            <h2 className="text-3xl font-bold text-gray-900 mb-3">How It Works</h2>
+                            <p className="text-gray-600">Get actionable insights to improve your AI visibility</p>
+                        </div>
+                        <div className="grid md:grid-cols-3 gap-8">
+                            {[
+                                { 
+                                    icon: <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>,
+                                    title: 'SALT Score Analysis', 
+                                    desc: 'Semantic, Authority, Location & Trust metrics show exactly how AI platforms see you' 
+                                },
+                                { 
+                                    icon: <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>,
+                                    title: 'Market Comparison', 
+                                    desc: 'See how you rank against other agents in your city and state' 
+                                },
+                                { 
+                                    icon: <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>,
+                                    title: 'Action Plan', 
+                                    desc: 'Personalized recommendations to boost your visibility on AI platforms' 
+                                }
+                            ].map((f, i) => (
+                                <div key={i} className="bg-white rounded-xl p-6 border border-gray-200 hover-lift card-shadow animate-in" style={{animationDelay: `${i * 100}ms`}}>
+                                    <div className="w-12 h-12 bg-[#006AFF]/10 text-[#006AFF] rounded-lg flex items-center justify-center mb-4">
+                                        {f.icon}
+                                    </div>
+                                    <h3 className="text-lg font-semibold text-gray-900 mb-2">{f.title}</h3>
+                                    <p className="text-gray-600 text-sm">{f.desc}</p>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Testimonial / Social Proof */}
+                    <div className="bg-[#1E3A5F] py-16">
+                        <div className="max-w-4xl mx-auto px-6 text-center">
+                            <p className="text-white text-xl md:text-2xl font-medium mb-6">
+                                "Understanding how AI recommends agents is the new frontier of real estate marketing. 
+                                Don't get left behind."
+                            </p>
+                            <div className="flex items-center justify-center gap-3">
+                                <img src={RealEstateImages.agent} alt="Expert" className="w-12 h-12 rounded-full object-cover border-2 border-white/20"/>
+                                <div className="text-left">
+                                    <div className="text-white font-medium">Industry Expert</div>
+                                    <div className="text-gray-400 text-sm">Real Estate Technology</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Property Showcase - Commented out
+                    <div className="max-w-6xl mx-auto px-6 py-16">
+                        <h2 className="text-2xl font-bold text-gray-900 mb-8 text-center">Trusted by Top Agents</h2>
+                        <div className="grid md:grid-cols-3 gap-6">
+                            {[RealEstateImages.luxury, RealEstateImages.suburban, RealEstateImages.modern].map((img, i) => (
+                                <div key={i} className="rounded-xl overflow-hidden card-shadow hover-lift">
+                                    <img src={img} alt="Property" className="w-full h-48 object-cover"/>
+                                    <div className="p-4 bg-white">
+                                        <div className="text-sm text-gray-500">Featured Agent Market</div>
+                                        <div className="font-semibold text-gray-900">Premium Visibility</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    */}
+
+                    <FooterSection />
+                </div>
+            );
+        };
+
+        // ============== SNAPSHOT PAGE ==============
+        const SnapshotPage = ({ agentName, user, onBack, onUpgrade, onLogin, onLogout, onAddAgent, onViewSALT, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
+            const [showLoginModal, setShowLoginModal] = useState(false);
+            
+            // Use ref to track if we've already fetched for this agent
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
+
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
+
+            useEffect(() => {
+                // If we have cached data, use it immediately
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    hasFetchedRef.current = true;
+                    return;
+                }
+                
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
+                setLoading(true);
+                
+                fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
+                    .then(r => r.json())
+                    .then(d => {
+                        setData(d);
+                        // Cache the data at parent level
+                        if (onDataLoaded && !d.error) {
+                            onDataLoaded(d);
+                        }
+                        setLoading(false);
+                    })
+                    .catch(() => {
+                        setData({error: 'Failed to load data'});
+                        setLoading(false);
+                    });
+            }, [agentName, cachedData]); // Removed fetchData and onDataLoaded from deps
+
+            // Handle login state change separately
+            const prevLoggedIn = React.useRef(user?.logged_in);
+            useEffect(() => {
+                if (prevLoggedIn.current !== user?.logged_in && data) {
+                    prevLoggedIn.current = user?.logged_in;
+                    // User logged in/out - need to refresh for SALT scores
+                    setLoading(true);
+                    fetch(`/api/visibility/free?name=${encodeURIComponent(agentName)}`)
+                        .then(r => r.json())
+                        .then(d => {
+                            setData(d);
+                            if (onDataLoaded && !d.error) {
+                                onDataLoaded(d);
+                            }
+                            setLoading(false);
+                        })
+                        .catch(() => {
+                            setLoading(false);
+                        });
+                }
+            }, [user?.logged_in]);
+
+            if (loading) return <LoadingScreen title="Analyzing Visibility" subtitle="Computing AI discoverability metrics"/>;
+
+            if (!data || data.error) {
+                const isNotFound = data?.not_found;
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 p-6">
+                        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl border border-gray-100 p-8 text-center">
+                            <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                </svg>
+                            </div>
+                            <h2 className="text-2xl font-bold text-gray-900 mb-3">
+                                {isNotFound ? 'Agent Not Found' : 'Error Loading Data'}
+                            </h2>
+                            <p className="text-gray-600 mb-6">
+                                {isNotFound
+                                    ? `We couldn't find "${agentName}" in our database. Would you like to add them?`
+                                    : data?.error || 'Something went wrong. Please try again.'
+                                }
+                            </p>
+                            <div className="space-y-3">
+                                {isNotFound && (
+                                    <button
+                                        onClick={onAddAgent}
+                                        className="w-full px-6 py-3 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-semibold rounded-xl hover:from-emerald-700 hover:to-teal-700 transition shadow-lg"
+                                    >
+                                        Add This Agent
+                                    </button>
+                                )}
+                                <button
+                                    onClick={onBack}
+                                    className="w-full px-6 py-3 bg-gray-100 text-gray-700 font-semibold rounded-xl hover:bg-gray-200 transition"
+                                >
+                                    Back to Search
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            const isLoggedIn = data.user_status?.logged_in;
+            const isPaid = data.user_status?.paid;
+
+            // Score color based on performance
+            const getScoreColor = (score) => {
+                if (score >= 80) return { bg: 'bg-[#00D395]', text: 'text-[#00D395]', light: 'bg-[#00D395]/10' };
+                if (score >= 60) return { bg: 'bg-[#006AFF]', text: 'text-[#006AFF]', light: 'bg-[#006AFF]/10' };
+                if (score >= 40) return { bg: 'bg-[#FF9500]', text: 'text-[#FF9500]', light: 'bg-[#FF9500]/10' };
+                return { bg: 'bg-[#FF3B30]', text: 'text-[#FF3B30]', light: 'bg-[#FF3B30]/10' };
+            };
+            const scoreStyle = getScoreColor(data.visibility_score);
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    <Navbar user={user} onLogin={() => setShowLoginModal(true)} onLogout={onLogout} onAddAgent={onAddAgent} />
+
+                    {/* Hero Header with Property Image */}
+                    <div className="relative h-48 bg-[#1E3A5F]">
+                        <img 
+                            src={RealEstateImages.neighborhood} 
+                            alt="Neighborhood" 
+                            className="absolute inset-0 w-full h-full object-cover opacity-30"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-[#1E3A5F] to-transparent"/>
+                    </div>
+
+                    <div className="max-w-6xl mx-auto px-6 -mt-24 relative z-10 pb-12">
+                        {/* Back button */}
+                        <button
+                            onClick={onBack}
+                            className="mb-4 text-white/80 hover:text-white flex items-center gap-2 transition text-sm"
+                        >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Search
+                        </button>
+
+                        {/* Agent Profile Card */}
+                        <div className="bg-white rounded-xl card-shadow-lg mb-6 overflow-hidden animate-in">
+                            <div className="p-6 lg:p-8">
+                                <div className="flex flex-col lg:flex-row gap-6">
+                                    {/* Avatar */}
+                                    <div className={`w-24 h-24 lg:w-28 lg:h-28 ${scoreStyle.bg} rounded-xl flex items-center justify-center text-white text-3xl font-bold flex-shrink-0 mx-auto lg:mx-0`}>
+                                        {(data.agent.name || 'NA').split(' ').map(n => n[0]).join('')}
+                                    </div>
+
+                                    {/* Info */}
+                                    <div className="flex-1 text-center lg:text-left">
+                                        <h1 className="text-2xl lg:text-3xl font-bold text-gray-900 mb-2">{data.agent.name}</h1>
+                                        <div className="flex flex-wrap items-center justify-center lg:justify-start gap-4 text-gray-600 mb-4">
+                                            <span className="flex items-center gap-1.5 text-sm">
+                                                <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+                                                </svg>
+                                                {data.agent.brokerage || 'Independent Agent'}
+                                            </span>
+                                            <span className="flex items-center gap-1.5 text-sm">
+                                                <svg className="w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                                                </svg>
+                                                {data.agent.city}, {data.agent.state}
+                                            </span>
+                                        </div>
+                                        <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2">
+                                            {data.basic_metrics.average_rating > 0 && (
+                                                <span className="px-3 py-1 bg-amber-50 text-amber-700 rounded-full text-xs font-medium flex items-center gap-1">
+                                                    <svg className="w-3 h-3 fill-amber-500" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+                                                    {data.basic_metrics.average_rating.toFixed(1)} ({data.basic_metrics.total_reviews})
+                                                </span>
+                                            )}
+                                            <span className="px-3 py-1 bg-blue-50 text-[#006AFF] rounded-full text-xs font-medium">
+                                                {data.basic_metrics.specialization || 'Residential'}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* Visibility Score Circle */}
+                                    <div className="flex flex-col items-center lg:items-end">
+                                        <div className="relative w-32 h-32">
+                                            <svg className="w-full h-full transform -rotate-90">
+                                                <circle cx="64" cy="64" r="56" fill="none" stroke="#e5e7eb" strokeWidth="8"/>
+                                                <circle 
+                                                    cx="64" cy="64" r="56" fill="none" 
+                                                    stroke={data.visibility_score >= 80 ? '#00D395' : data.visibility_score >= 60 ? '#006AFF' : data.visibility_score >= 40 ? '#FF9500' : '#FF3B30'}
+                                                    strokeWidth="8" 
+                                                    strokeLinecap="round"
+                                                    strokeDasharray={`${data.visibility_score * 3.52} 352`}
+                                                />
+                                            </svg>
+                                            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                                <span className="text-3xl font-bold text-gray-900">{data.visibility_score}</span>
+                                                <span className="text-xs text-gray-500">out of 100</span>
+                                            </div>
+                                        </div>
+                                        <div className={`mt-2 px-3 py-1 ${scoreStyle.light} ${scoreStyle.text} rounded-full text-xs font-semibold`}>
+                                            {data.visibility_tier} Tier
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* SALT Scores Section */}
+                        {isLoggedIn && data.salt_scores ? (
+                            <div className="bg-white rounded-xl card-shadow mb-6 animate-in">
+                                <div className="p-6 border-b border-gray-100">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h2 className="text-lg font-bold text-gray-900">SALT Score Breakdown</h2>
+                                            <p className="text-sm text-gray-500">Semantic, Authority, Location & Trust metrics</p>
+                                        </div>
+                                        <button 
+                                            onClick={onViewSALT}
+                                            className="px-4 py-2 text-sm font-medium text-[#006AFF] bg-[#006AFF]/10 rounded-lg hover:bg-[#006AFF]/20 transition flex items-center gap-2"
+                                        >
+                                            View Details
+                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7"/></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="p-6">
+                                    <div className="grid md:grid-cols-2 gap-4">
+                                        {[
+                                            { label: 'Semantic', desc: 'Identity clarity', score: data.salt_scores.semantic, color: '#006AFF', barClass: 'score-bar-semantic' },
+                                            { label: 'Authority', desc: 'Cite-worthiness', score: data.salt_scores.authority, color: '#8B5CF6', barClass: 'score-bar-authority' },
+                                            { label: 'Location', desc: 'Market grounding', score: data.salt_scores.location, color: '#00D395', barClass: 'score-bar-location' },
+                                            { label: 'Trust', desc: 'Safety to recommend', score: data.salt_scores.trust, color: '#FF9500', barClass: 'score-bar-trust' }
+                                        ].map((metric, i) => (
+                                            <div key={i} className="bg-gray-50 rounded-lg p-4">
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <div>
+                                                        <span className="font-semibold text-gray-900">{metric.label}</span>
+                                                        <span className="text-xs text-gray-500 ml-2">{metric.desc}</span>
+                                                    </div>
+                                                    <span className="text-xl font-bold" style={{color: metric.color}}>{metric.score || 0}</span>
+                                                </div>
+                                                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                                                    <div
+                                                        className={`h-full ${metric.barClass} rounded-full transition-all duration-1000`}
+                                                        style={{width: `${metric.score || 0}%`}}
+                                                    />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* LLM Visibility Scores with Real Logos */}
+                                {data.llm_visibility_scores && (
+                                    <div className="border-t border-gray-100">
+                                        <div className="p-6">
+                                            <h3 className="text-sm font-semibold text-gray-900 mb-4">AI Platform Visibility Scores</h3>
+                                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                                {[
+                                                    { name: 'ChatGPT', key: 'chatgpt', logo: AILogos.chatgpt, bgColor: 'bg-[#10A37F]/10' },
+                                                    { name: 'Claude', key: 'claude', logo: AILogos.claude, bgColor: 'bg-[#D97706]/10' },
+                                                    { name: 'Perplexity', key: 'perplexity', logo: AILogos.perplexity, bgColor: 'bg-[#1E3A5F]/10' },
+                                                    { name: 'Gemini', key: 'gemini', logo: AILogos.gemini, bgColor: 'bg-[#4285F4]/10' }
+                                                ].map((platform, i) => {
+                                                    const score = data.llm_visibility_scores[platform.key] || 0;
+                                                    const statusColor = score >= 80 ? 'text-[#00D395]' : score >= 60 ? 'text-[#006AFF]' : score >= 40 ? 'text-[#FF9500]' : 'text-[#FF3B30]';
+                                                    return (
+                                                        <div key={i} className={`${platform.bgColor} rounded-lg p-4 text-center hover-lift`}>
+                                                            <img src={platform.logo} alt={platform.name} className="h-6 mx-auto mb-3 object-contain" onError={(e) => e.target.style.display='none'}/>
+                                                            <div className={`text-2xl font-bold ${statusColor}`}>{score}</div>
+                                                            <div className="text-xs text-gray-500 mt-1">{platform.name}</div>
+                                                            <div className="mt-2 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                                                <div 
+                                                                    className="h-full rounded-full transition-all duration-1000"
+                                                                    style={{
+                                                                        width: `${score}%`,
+                                                                        backgroundColor: score >= 80 ? '#00D395' : score >= 60 ? '#006AFF' : score >= 40 ? '#FF9500' : '#FF3B30'
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        ) : (
+                            <div className="bg-[#1E3A5F] rounded-xl p-8 lg:p-12 text-center text-white mb-6 relative overflow-hidden animate-in">
+                                <img src={RealEstateImages.office} alt="" className="absolute inset-0 w-full h-full object-cover opacity-20"/>
+                                <div className="relative z-10">
+                                    <div className="w-16 h-16 bg-white/10 rounded-xl flex items-center justify-center mx-auto mb-6">
+                                        <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                                        </svg>
+                                    </div>
+                                    <h2 className="text-2xl font-bold mb-3">Unlock Your SALT Score</h2>
+                                    <p className="text-gray-300 mb-6 max-w-lg mx-auto text-sm">
+                                        Sign in to view your detailed SALT metrics and see how you rank against competitors in your market.
+                                    </p>
+                                    <button
+                                        onClick={() => setShowLoginModal(true)}
+                                        className="px-6 py-3 bg-[#006AFF] text-white font-semibold rounded-lg hover:bg-[#0051CC] transition"
+                                    >
+                                        Sign In to Unlock
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Full Report CTA - Professional Style */}
+                        <div className="bg-white rounded-xl card-shadow overflow-hidden mb-6 animate-in">
+                            <div className="grid lg:grid-cols-2">
+                                <div className="p-8 lg:p-10">
+                                    <span className="inline-block px-3 py-1 bg-[#00D395]/10 text-[#00D395] text-xs font-semibold rounded-full mb-4">
+                                        PREMIUM REPORT
+                                    </span>
+                                    <h2 className="text-2xl font-bold text-gray-900 mb-3">Get Your Full AI Visibility Report</h2>
+                                    <p className="text-gray-600 mb-6">
+                                        Comprehensive analysis with actionable recommendations to improve your visibility across all AI platforms.
+                                    </p>
+                                    <div className="space-y-3 mb-6">
+                                        {[
+                                            'Complete SALT score breakdown with improvement tips',
+                                            'Competitor comparison in your market',
+                                            'Personalized 30-day action plan',
+                                            'AI platform-specific optimization guide'
+                                        ].map((item, i) => (
+                                            <div key={i} className="flex items-center gap-2 text-sm text-gray-700">
+                                                <svg className="w-5 h-5 text-[#00D395]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
+                                                </svg>
+                                                {item}
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <button
+                                        onClick={onUpgrade}
+                                        className="px-8 py-3 bg-[#006AFF] text-white font-semibold rounded-lg hover:bg-[#0051CC] transition"
+                                    >
+                                        {isPaid ? 'View Full Report' : 'Get Full Report — $49'}
+                                    </button>
+                                    {!isPaid && <p className="text-xs text-gray-500 mt-3">One-time payment • Instant access</p>}
+                                </div>
+                                <div className="hidden lg:block relative">
+                                    <img src={RealEstateImages.sold} alt="Success" className="absolute inset-0 w-full h-full object-cover"/>
+                                    <div className="absolute inset-0 bg-gradient-to-r from-white via-white/50 to-transparent"/>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <LoginModal
+                        show={showLoginModal}
+                        onClose={() => setShowLoginModal(false)}
+                        onSuccess={(userData) => {
+                            setShowLoginModal(false);
+                            // Also update the parent's user state
+                            if (onLogin) onLogin(userData);
+                            // Refresh data without page reload - refetch with new auth
+                            fetchData();
+                        }}
+                    />
+
+                    <FooterSection />
+                </div>
+            );
+        };
+
+        // ============== PAYWALL PAGE ==============
+        const PaywallPage = ({ agentName, user, onBack, onPaymentSuccess, onLogout, onAddAgent }) => {
+            const [processing, setProcessing] = useState(false);
+
+            const handlePayment = async () => {
+                setProcessing(true);
+                await new Promise(r => setTimeout(r, 1500));
+
+                try {
+                    const r = await fetch('/api/auth/upgrade', { method: 'POST' });
+                    const d = await r.json();
+                    if (d.success) {
+                        onPaymentSuccess(d.user);
+                    }
+                } catch {
+                    alert('Payment failed');
+                } finally {
+                    setProcessing(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+                    <Navbar user={user} onLogin={() => {}} onLogout={onLogout} onAddAgent={onAddAgent} />
+
+                    <div className="max-w-4xl mx-auto px-6 py-16">
+                        <div className="bg-white rounded-3xl shadow-2xl border border-gray-200 overflow-hidden">
+                            {/* Header */}
+                            <div className="bg-gradient-to-br from-blue-600 to-purple-600 p-12 text-center text-white">
+                                <h1 className="text-4xl font-extrabold mb-4">Unlock Your Full Visibility Report</h1>
+                                <p className="text-xl text-blue-100">Get complete AI visibility analysis for {agentName}</p>
+                            </div>
+
+                            {/* Features */}
+                            <div className="p-12">
+                                <div className="grid md:grid-cols-2 gap-6 mb-10">
+                                    {[
+                                        { icon: '📊', title: 'Full Analytics Dashboard', desc: 'Comprehensive visibility metrics and trends' },
+                                        { icon: '🎯', title: 'Competitor Analysis', desc: 'See how you stack up against local agents' },
+                                        { icon: '🚀', title: 'Personalized Action Plan', desc: 'Step-by-step recommendations to improve' },
+                                        { icon: '📈', title: 'Market Positioning', desc: 'Understand your position in the market' }
+                                    ].map((f, i) => (
+                                        <div key={i} className="flex items-start gap-4 p-6 bg-gray-50 rounded-2xl">
+                                            <span className="text-4xl">{f.icon}</span>
+                                            <div>
+                                                <h3 className="font-bold text-gray-900 mb-1">{f.title}</h3>
+                                                <p className="text-sm text-gray-600">{f.desc}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Pricing */}
+                                <div className="text-center p-8 bg-gradient-to-br from-blue-50 to-purple-50 rounded-2xl mb-8">
+                                    <div className="text-6xl font-extrabold text-gray-900 mb-2">$49</div>
+                                    <div className="text-gray-600 mb-6">One-time payment • Instant access • No subscription</div>
+                                    <button
+                                        onClick={handlePayment}
+                                        disabled={processing}
+                                        className="px-12 py-5 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-extrabold rounded-2xl hover:from-blue-700 hover:to-purple-700 transition shadow-2xl disabled:opacity-50 text-xl"
+                                    >
+                                        {processing ? 'Processing...' : 'Unlock Full Report Now'}
+                                    </button>
+                                </div>
+
+                                <div className="text-center">
+                                    <button
+                                        onClick={onBack}
+                                        className="text-gray-600 hover:text-gray-900 text-sm font-medium"
+                                    >
+                                        ← Back to Preview
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // ============== FULL REPORT PAGE ==============
+        const FullReportPage = ({ agentName, user, onBack, onLogout, onAddAgent, onViewSALT, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
+            const [error, setError] = useState(null);
+            const [showRemediation, setShowRemediation] = useState(false);
+            
+            // Use ref to track if we've already fetched
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
+
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
+
+            useEffect(() => {
+                // Use cached data if available
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    hasFetchedRef.current = true;
+                    return;
+                }
+                
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
+                setLoading(true);
+                setError(null);
+                fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
+                    .then(r => {
+                        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                        return r.json();
+                    })
+                    .then(d => {
+                        if (d.error) {
+                            setError(d.error);
+                        } else {
+                            setData(d);
+                            // Cache at parent level
+                            if (onDataLoaded) {
+                                onDataLoaded(d);
+                            }
+                        }
+                        setLoading(false);
+                    })
+                    .catch(e => {
+                        setError(e.message);
+                        setLoading(false);
+                    });
+            }, [agentName, cachedData]);
+
+            if (loading) return <LoadingScreen title="Generating Full Report" subtitle="Comprehensive AI visibility analysis"/>;
+
+            if (error || !data) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 p-6">
+                        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 text-center">
+                            <div className="w-20 h-20 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-6">
+                                <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                                </svg>
+                            </div>
+                            <h2 className="text-2xl font-bold text-gray-900 mb-3">Error Loading Report</h2>
+                            <p className="text-gray-600 mb-6">{error || 'Something went wrong. Please try again.'}</p>
+                            <button onClick={onBack} className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition">Go Back</button>
+                        </div>
+                    </div>
+                );
+            }
+
+            const agent = data.agent || {};
+            const analysis = data.analysis || {};
+            const scores = analysis.scores || {};
+            const webSignals = analysis.web_signals_summary || {};
+            const llmScores = analysis.llm_visibility_scores || {};
+            const aiTrustIndex = analysis.ai_trust_index || { score: 0, grade: 'N/A' };
+            const entityVerification = webSignals.entity_verification || {};
+            const sentimentKeywords = webSignals.sentiment_keywords || {};
+            const reviewSources = webSignals.review_sources || {};
+            const aiGapAnalysis = analysis.ai_gap_analysis || [];
+            const roadmap = analysis.geo_improvement_roadmap || {};
+            const keyLinks = analysis.key_links || {};
+
+            const overallScore = scores.overall?.score || 0;
+            const tier = scores.overall?.tier || 'Developing';
+            
+            const getScoreColor = (score) => {
+                if (score >= 80) return '#10B981';
+                if (score >= 60) return '#3B82F6';
+                if (score >= 40) return '#F59E0B';
+                return '#EF4444';
+            };
+
+            const getTierColor = (tier) => {
+                switch(tier?.toLowerCase()) {
+                    case 'elite': return 'bg-purple-500';
+                    case 'exceptional': return 'bg-green-500';
+                    case 'strong': return 'bg-blue-500';
+                    case 'solid': return 'bg-yellow-500';
+                    default: return 'bg-orange-500';
+                }
+            };
+
+            // Circular progress component for SALT scores
+            const CircularProgress = ({ score, label, change }) => {
+                const color = getScoreColor(score);
+                const circumference = 2 * Math.PI * 36;
+                const offset = circumference - (score / 100) * circumference;
+                
+                return (
+                    <div className="flex flex-col items-center">
+                        <div className="relative w-20 h-20">
+                            <svg className="w-full h-full transform -rotate-90">
+                                <circle cx="40" cy="40" r="36" fill="none" stroke="#E5E7EB" strokeWidth="6"/>
+                                <circle 
+                                    cx="40" cy="40" r="36" fill="none" 
+                                    stroke={color}
+                                    strokeWidth="6" 
+                                    strokeLinecap="round"
+                                    strokeDasharray={circumference}
+                                    strokeDashoffset={offset}
+                                />
+                            </svg>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <span className="text-xl font-bold text-gray-800">{score}</span>
+                            </div>
+                        </div>
+                        <span className="text-xs font-medium text-gray-600 mt-2">{label}</span>
+                        {change && (
+                            <span className={`text-xs mt-1 ${change > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                {change > 0 ? '+' : ''}{change}%
+                            </span>
+                        )}
+                    </div>
+                );
+            };
+
+            // Platform logo component
+            const PlatformBadge = ({ platform, verified }) => {
+                const logos = {
+                    google: '🔍',
+                    zillow: '🏠',
+                    realtor: '🔑',
+                    brokerage: '🏢',
+                    website: '🌐',
+                    database: '📊'
+                };
+                return (
+                    <div className="flex items-center gap-1">
+                        <span className="text-sm">{logos[platform] || '📌'}</span>
+                        {verified && (
+                            <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                            </svg>
+                        )}
+                    </div>
+                );
+            };
+
+            // Platform link icon component with brand colors
+            const PlatformLinkIcon = ({ platform, url }) => {
+                if (!url) return null;
+                
+                const platformConfig = {
+                    zillow: {
+                        name: 'Zillow',
+                        color: '#006AFF',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12.006 0L1.5 8.391v6.617l3.673-2.928V8.973l6.833-5.46 6.833 5.46v3.107l3.661 2.928V8.391L12.006 0zm6.833 14.652l-6.833 5.46-6.833-5.46L1.5 17.58v3.029L12.006 24l10.494-8.391v-3.029l-3.661 2.072z"/>
+                            </svg>
+                        )
+                    },
+                    realtor: {
+                        name: 'Realtor',
+                        color: '#D92228',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                            </svg>
+                        )
+                    },
+                    homes: {
+                        name: 'Homes.com',
+                        color: '#00A650',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
+                            </svg>
+                        )
+                    },
+                    google: {
+                        name: 'Google',
+                        color: '#4285F4',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                            </svg>
+                        )
+                    },
+                    linkedin: {
+                        name: 'LinkedIn',
+                        color: '#0A66C2',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+                            </svg>
+                        )
+                    },
+                    instagram: {
+                        name: 'Instagram',
+                        color: '#E4405F',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12c0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24c3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z"/>
+                            </svg>
+                        )
+                    },
+                    facebook: {
+                        name: 'Facebook',
+                        color: '#1877F2',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                            </svg>
+                        )
+                    },
+                    youtube: {
+                        name: 'YouTube',
+                        color: '#FF0000',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                            </svg>
+                        )
+                    },
+                    twitter: {
+                        name: 'X (Twitter)',
+                        color: '#000000',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                            </svg>
+                        )
+                    },
+                    website: {
+                        name: 'Website',
+                        color: '#6366F1',
+                        icon: (
+                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                            </svg>
+                        )
+                    }
+                };
+
+                const config = platformConfig[platform];
+                if (!config) return null;
+
+                return (
+                    <a 
+                        href={url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="flex flex-col items-center gap-1 transition-all hover:scale-110"
+                        title={config.name}
+                    >
+                        <div 
+                            className="flex items-center justify-center w-10 h-10 rounded-full hover:shadow-lg transition-shadow"
+                            style={{ backgroundColor: config.color + '15', color: config.color }}
+                        >
+                            {config.icon}
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-medium">{config.name}</span>
+                    </a>
+                );
+            };
+
+            // Calculate review source percentages
+            const totalReviews = webSignals.total_verified_reviews || 0;
+            const zillowReviews = reviewSources.zillow?.reviews || 0;
+            const googleReviews = reviewSources.google?.reviews || 0;
+            const realtorReviews = reviewSources.realtor?.reviews || 0;
+            
+            const zillowPct = totalReviews > 0 ? Math.round((zillowReviews / totalReviews) * 100) : 0;
+            const googlePct = totalReviews > 0 ? Math.round((googleReviews / totalReviews) * 100) : 0;
+            const realtorPct = totalReviews > 0 ? 100 - zillowPct - googlePct : 0;
+
+            // Get top 3 sentiment keywords with relative percentages
+            const allSentiments = Object.entries(sentimentKeywords)
+                .filter(([_, count]) => count > 0)
+                .sort((a, b) => b[1] - a[1]);
+            
+            const maxSentimentCount = allSentiments.length > 0 ? allSentiments[0][1] : 1;
+            
+            const topSentiments = allSentiments
+                .slice(0, 3)
+                .map(([keyword, count]) => {
+                    // Calculate percentage relative to max (top sentiment = 100%)
+                    const percentage = Math.round((count / maxSentimentCount) * 100);
+                    // Estimate reviews mentioning this (cap at totalReviews)
+                    const estimatedReviews = Math.min(count, totalReviews || count);
+                    return [keyword, estimatedReviews, percentage];
+                });
+
+            // Remediation Modal
+            const RemediationModal = () => (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-2xl max-w-2xl w-full max-h-[80vh] overflow-auto p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-gray-900">Remediation Plan</h2>
+                            <button onClick={() => setShowRemediation(false)} className="text-gray-400 hover:text-gray-600">
+                                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            <div className="p-4 bg-red-50 rounded-lg border-l-4 border-red-500">
+                                <h3 className="font-semibold text-red-800 mb-2">Critical (Week 1)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.critical_issues || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-red-700 flex items-start gap-2">
+                                            <span className="text-red-500">•</span>{item}
                                         </li>
                                     ))}
                                 </ul>
                             </div>
-                        )}
-                        
-                        {/* Page 3: Detailed GEO Improvement Roadmap */}
-                        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-8">
-                            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                                <span className="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-sm font-bold">3</span>
-                                GEO Improvement Roadmap
-                            </h2>
-                            
-                            {/* Critical Issues */}
-                            {analysis.geo_improvement_roadmap?.critical_issues && (
-                                <div className="mb-8">
-                                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                                        <span className="px-3 py-1 bg-red-100 text-red-700 rounded-full text-xs font-bold">CRITICAL</span>
-                                        Address Immediately
-                                    </h3>
-                                    <ul className="space-y-2 border-l-4 border-red-500 pl-4">
-                                        {analysis.geo_improvement_roadmap.critical_issues.map((item, i) => (
-                                            <li key={i} className="text-sm text-gray-700">
-                                                <span className="font-semibold text-red-600">{item.split(':')[0]}:</span> {item.split(':')[1]}
-                                            </li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
-                            
-                            {/* High Priority */}
-                            {analysis.geo_improvement_roadmap?.high_priority && (
-                                <div className="mb-8">
-                                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                                        <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-xs font-bold">HIGH PRIORITY</span>
-                                        3-6 Month Plan
-                                    </h3>
-                                    <div className="grid md:grid-cols-2 gap-4">
-                                        {analysis.geo_improvement_roadmap.high_priority.map((item, i) => (
-                                            <div key={i} className="bg-amber-50 rounded-lg p-4 border border-amber-200">
-                                                <h4 className="font-semibold text-amber-900 text-sm mb-2">{item.split(':')[0]}</h4>
-                                                <p className="text-sm text-amber-800">{item.split(':')[1] || item}</p>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                            
-                            {/* Quick Wins */}
-                            {analysis.geo_improvement_roadmap?.quick_wins && (
-                                <div className="mb-8">
-                                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                                        <span className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-full text-xs font-bold">QUICK WINS</span>
-                                        Easy & High Impact
-                                    </h3>
-                                    <div className="grid md:grid-cols-2 gap-3">
-                                        {analysis.geo_improvement_roadmap.quick_wins.map((item, i) => (
-                                            <div key={i} className="flex items-start gap-3 bg-emerald-50 rounded-lg p-4 border border-emerald-200">
-                                                <svg className="w-5 h-5 text-emerald-600 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
-                                                </svg>
-                                                <div className="text-sm text-emerald-900">{item}</div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-                            
-                            {/* Estimated Impact */}
-                            {analysis.geo_improvement_roadmap?.estimated_impact && (
-                                <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-                                    <p className="text-sm text-blue-900">
-                                        <span className="font-semibold">📈 Potential Impact:</span> {analysis.geo_improvement_roadmap.estimated_impact}
-                                    </p>
-                                </div>
-                            )}
+                            <div className="p-4 bg-orange-50 rounded-lg border-l-4 border-orange-500">
+                                <h3 className="font-semibold text-orange-800 mb-2">High Priority (Week 2)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.high_priority || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-orange-700 flex items-start gap-2">
+                                            <span className="text-orange-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-blue-50 rounded-lg border-l-4 border-blue-500">
+                                <h3 className="font-semibold text-blue-800 mb-2">Medium Priority (Week 3-4)</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.medium_priority || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-blue-700 flex items-start gap-2">
+                                            <span className="text-blue-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-green-50 rounded-lg border-l-4 border-green-500">
+                                <h3 className="font-semibold text-green-800 mb-2">Quick Wins</h3>
+                                <ul className="space-y-2">
+                                    {(roadmap.quick_wins || []).map((item, i) => (
+                                        <li key={i} className="text-sm text-green-700 flex items-start gap-2">
+                                            <span className="text-green-500">•</span>{item}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
                         </div>
-                        
-                        {/* Page 4: Action Plan */}
-                        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-8">
-                            <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-                                <span className="w-8 h-8 bg-blue-100 text-blue-600 rounded-lg flex items-center justify-center text-sm font-bold">4</span>
-                                Actionable Intelligence (Strengths & Improvement Areas)
-                            </h2>
-                            
-                            <div className="grid md:grid-cols-2 gap-6 mb-8">
-                                <div>
-                                    <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                                        <span className="text-emerald-500">✓</span> Strengths
-                                    </h3>
-                                    <ul className="space-y-2">
-                                        {analysis.profile_analysis?.strengths?.map((s, i) => (
-                                            <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                <span className="text-emerald-500">•</span> {s}
-                                            </li>
-                                        ))}
-                                    </ul>
+                        <button 
+                            onClick={() => setShowRemediation(false)}
+                            className="mt-6 w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition"
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="min-h-screen bg-gray-50">
+                    <Navbar user={user} onLogin={() => {}} onLogout={onLogout} onAddAgent={onAddAgent} />
+                    
+                    {showRemediation && <RemediationModal />}
+
+                    <div className="max-w-7xl mx-auto px-4 py-6">
+                        {/* Back Button */}
+                        <button onClick={onBack} className="mb-4 text-gray-600 hover:text-gray-900 flex items-center gap-2 transition text-sm">
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Search
+                        </button>
+
+                        {/* Agent Header Card */}
+                        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+                            <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                                <div className="flex items-center gap-4">
+                                    <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white text-xl font-bold shadow-lg">
+                                        {(agent.name || 'NA').split(' ').map(n => n[0]).join('')}
+                                    </div>
+                                    <div>
+                                        <h1 className="text-2xl font-bold text-gray-900">{agent.name || 'Unknown Agent'}</h1>
+                                        <p className="text-sm text-gray-500">
+                                            {(agent.license?.number || entityVerification.license_node?.value) ? `RE #${agent.license?.number || entityVerification.license_node?.value}` : 'License Pending'} • Licensed Real Estate Professional
+                                        </p>
+                                        {/* Personal Info: Phone & Email */}
+                                        <div className="flex flex-col gap-0.5 mt-1">
+                                            {agent.phone && (
+                                                <span className="text-xs text-gray-600">
+                                                    <span className="font-medium">Phone:</span> {agent.phone}
+                                                </span>
+                                            )}
+                                            {agent.email && (
+                                                <span className="text-xs text-gray-600">
+                                                    <span className="font-medium">Email:</span> {agent.email}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <span className={`px-2 py-0.5 ${getTierColor(tier)} text-white text-xs font-medium rounded`}>
+                                                TIER: {tier.toUpperCase()}
+                                            </span>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div>
-                                    <h3 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                                        <span className="text-red-500">⚠</span> Critical Gaps
-                                    </h3>
-                                    <ul className="space-y-2">
-                                        {analysis.profile_analysis?.areas_for_improvement?.map((a, i) => (
-                                            <li key={i} className="flex items-start gap-2 text-sm text-gray-600">
-                                                <span className="text-red-500">•</span> {a}
-                                            </li>
-                                        ))}
-                                    </ul>
+                                <div className="flex items-center gap-8">
+                                    <div className="text-center">
+                                        <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Overall SALT Score</div>
+                                        <div className="text-4xl font-bold text-gray-900">{overallScore}<span className="text-lg text-gray-400">/100</span></div>
+                                    </div>
+                                    <div className="h-12 w-px bg-gray-200"/>
+                                    <div className="text-center">
+                                        <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">AI Trust Index</div>
+                                        <div className="text-4xl font-bold" style={{color: getScoreColor(aiTrustIndex.score)}}>{aiTrustIndex.grade}</div>
+                                    </div>
                                 </div>
                             </div>
                             
-                            {/* Detailed GEO Recommendations */}
-                            <div className="space-y-4">
-                                <h3 className="font-semibold text-gray-900 mb-4">Detailed GEO Improvement Strategy</h3>
-                                {analysis.recommendations?.for_agent?.map((rec, i) => (
-                                    <div key={i} className="bg-gradient-to-r from-blue-50 to-blue-100 rounded-lg p-5 border border-blue-200">
-                                        <div className="flex items-start gap-3">
-                                            <span className="inline-block w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center flex-shrink-0 text-xs font-bold">
-                                                {i + 1}
-                                            </span>
-                                            <p className="text-sm text-gray-800 leading-relaxed">{rec}</p>
+                            {/* Platform Links */}
+                            {Object.keys(keyLinks).length > 0 && (
+                                <div className="mt-4 pt-4 border-t border-gray-100">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-gray-500 uppercase tracking-wide">Agent Profiles & Social Media</span>
+                                        <div className="flex items-center gap-2">
+                                            <PlatformLinkIcon platform="zillow" url={keyLinks.zillow} />
+                                            <PlatformLinkIcon platform="realtor" url={keyLinks.realtor} />
+                                            <PlatformLinkIcon platform="homes" url={keyLinks.homes} />
+                                            <PlatformLinkIcon platform="google" url={keyLinks.google} />
+                                            <PlatformLinkIcon platform="website" url={keyLinks.website} />
+                                            <PlatformLinkIcon platform="linkedin" url={keyLinks.linkedin} />
+                                            <PlatformLinkIcon platform="instagram" url={keyLinks.instagram} />
+                                            <PlatformLinkIcon platform="facebook" url={keyLinks.facebook} />
+                                            <PlatformLinkIcon platform="youtube" url={keyLinks.youtube} />
+                                            <PlatformLinkIcon platform="twitter" url={keyLinks.twitter} />
                                         </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Main Grid */}
+                        <div className="grid lg:grid-cols-2 gap-6 mb-6">
+                            {/* SALT Score Breakdown */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <div className="flex items-center justify-between mb-6">
+                                    <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                        <span className="text-xl">📊</span> SALT Score Breakdown
+                                    </h2>
+                                    <button onClick={onViewSALT} className="text-sm text-blue-600 hover:underline">View Details →</button>
+                                </div>
+                                <div className="flex justify-around">
+                                    <CircularProgress score={scores.semantic?.score || 0} label="SEARCH" change={5} />
+                                    <CircularProgress score={scores.authority?.score || 0} label="AUTHORITY" change={-2} />
+                                    <CircularProgress score={scores.location?.score || 0} label="LOCAL" change={12} />
+                                    <CircularProgress score={scores.trust?.score || 0} label="TRUST" change={1} />
+                                </div>
+                            </div>
+
+                            {/* AI Model Visibility */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2 mb-6">
+                                    <span className="text-xl">🤖</span> AI Model Visibility
+                                </h2>
+                                <div className="space-y-4">
+                                    {[
+                                        { name: 'ChatGPT (OpenAI)', key: 'chatgpt', color: '#10A37F' },
+                                        { name: 'Claude (Anthropic)', key: 'claude', color: '#D97706' },
+                                        { name: 'Perplexity AI', key: 'perplexity', color: '#3B82F6' },
+                                        { name: 'Gemini (Google)', key: 'gemini', color: '#8B5CF6' }
+                                    ].map((p, i) => {
+                                        const score = llmScores[p.key] || 0;
+                                        return (
+                                            <div key={i} className="flex items-center gap-3">
+                                                <div className="w-32 text-sm text-gray-700">{p.name}</div>
+                                                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                    <div 
+                                                        className="h-full rounded-full transition-all duration-500" 
+                                                        style={{width: `${score}%`, backgroundColor: p.color}}
+                                                    />
+                                                </div>
+                                                <div className="w-12 text-right text-sm font-semibold text-gray-700">{score}%</div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Modern Entity Identity Ledger */}
+                        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                    <span className="text-xl">🔐</span> Modern Entity Identity Ledger
+                                </h2>
+                                <span className="flex items-center gap-1 text-sm text-green-600">
+                                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                    </svg>
+                                    ENTITY VERIFIED
+                                </span>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead>
+                                        <tr className="border-b border-gray-100">
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Information Key</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Entity Value</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Platform Anchors</th>
+                                            <th className="text-left py-3 px-4 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Canonical Name</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">"{entityVerification.canonical_name?.value || agent.name}"</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.canonical_name?.platform || 'database'} verified={entityVerification.canonical_name?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.canonical_name?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Primary Role</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">{entityVerification.primary_role?.value || 'Real Estate Agent'}</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.primary_role?.platform || 'database'} verified={entityVerification.primary_role?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.primary_role?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="border-b border-gray-50 hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">Brokerage Anchor</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">{entityVerification.brokerage_anchor?.value || agent.brokerage || 'Independent'}</td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform={entityVerification.brokerage_anchor?.platform || 'brokerage'} verified={entityVerification.brokerage_anchor?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.brokerage_anchor?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                        <tr className="hover:bg-gray-50">
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">License Node</td>
+                                            <td className="py-4 px-4 text-sm text-gray-600">
+                                                {(entityVerification.license_node?.value || agent.license?.number) 
+                                                    ? `${agent.location?.state || 'VA'} RE #${entityVerification.license_node?.value || agent.license?.number}` 
+                                                    : 'Not provided'}
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                <PlatformBadge platform="database" verified={entityVerification.license_node?.verified} />
+                                            </td>
+                                            <td className="py-4 px-4">
+                                                {entityVerification.license_node?.verified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                                                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                        </svg>
+                                                        Verified
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center px-2 py-1 bg-gray-100 text-gray-600 text-xs font-medium rounded-full">Pending</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Bottom Grid - Reviews & AI Gap Analysis */}
+                        <div className="grid lg:grid-cols-3 gap-6">
+                            {/* Review Source Mix */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">Review Source Mix</h2>
+                                <div className="flex items-center justify-center mb-4">
+                                    <div className="relative w-32 h-32">
+                                        {/* Simple donut chart using SVG */}
+                                        <svg viewBox="0 0 36 36" className="w-full h-full">
+                                            {/* Zillow - Blue */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#3B82F6" strokeWidth="3"
+                                                strokeDasharray={`${zillowPct} ${100 - zillowPct}`} strokeDashoffset="25"/>
+                                            {/* Google - Green */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#10B981" strokeWidth="3"
+                                                strokeDasharray={`${googlePct} ${100 - googlePct}`} strokeDashoffset={25 - zillowPct}/>
+                                            {/* Realtor - Orange */}
+                                            <circle cx="18" cy="18" r="15.915" fill="none" stroke="#F59E0B" strokeWidth="3"
+                                                strokeDasharray={`${realtorPct} ${100 - realtorPct}`} strokeDashoffset={25 - zillowPct - googlePct}/>
+                                        </svg>
+                                        <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                            <span className="text-2xl font-bold text-gray-900">{totalReviews}</span>
+                                            <span className="text-xs text-gray-500">TOTAL REVIEWS</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
+                                            <span className="text-gray-600">Zillow ({zillowPct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{zillowReviews}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-green-500 rounded-full"></span>
+                                            <span className="text-gray-600">Google ({googlePct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{googleReviews}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className="w-3 h-3 bg-yellow-500 rounded-full"></span>
+                                            <span className="text-gray-600">Realtor ({realtorPct}%)</span>
+                                        </div>
+                                        <span className="font-semibold text-gray-900">{realtorReviews}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* What Reviews Say */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">What Reviews Say</h2>
+                                <p className="text-xs text-gray-500 mb-3">Sentiment analysis from {totalReviews} reviews</p>
+                                <div className="space-y-4">
+                                    {topSentiments.length > 0 ? topSentiments.map(([keyword, count, percentage], i) => {
+                                        return (
+                                            <div key={i}>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <span className="text-sm text-gray-700 capitalize">"{keyword}"</span>
+                                                    <span className="text-xs text-gray-500">{count} mentions</span>
+                                                </div>
+                                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                    <div className="h-full bg-blue-500 rounded-full" style={{width: `${percentage}%`}}/>
+                                                </div>
+                                            </div>
+                                        );
+                                    }) : (
+                                        <div className="text-center text-gray-500 py-4">
+                                            <p className="text-sm">No sentiment data available</p>
+                                            <p className="text-xs mt-1">Review analysis pending</p>
+                                        </div>
+                                    )}
+                                </div>
+                                <p className="text-xs text-gray-400 mt-4">
+                                    Consistently praised for quick response times in the {agent.location?.city || 'local'} area.
+                                </p>
+                            </div>
+
+                            {/* AI Gap Analysis */}
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                                <h2 className="text-lg font-bold text-gray-900 mb-4">AI Gap Analysis</h2>
+                                <div className="space-y-3">
+                                    {aiGapAnalysis.length > 0 ? aiGapAnalysis.slice(0, 4).map((gap, i) => (
+                                        <div key={i} className="flex items-start gap-3">
+                                            {gap.status === 'verified' ? (
+                                                <svg className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd"/>
+                                                </svg>
+                                            ) : (
+                                                <svg className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd"/>
+                                                </svg>
+                                            )}
+                                            <div>
+                                                <p className={`text-sm font-medium ${gap.status === 'verified' ? 'text-green-700' : 'text-red-700'}`}>
+                                                    {gap.title}
+                                                </p>
+                                                <p className="text-xs text-gray-500">{gap.description}</p>
+                                            </div>
+                                        </div>
+                                    )) : (
+                                        <div className="text-center text-gray-500 py-4">
+                                            <p className="text-sm">Analyzing gaps...</p>
+                                        </div>
+                                    )}
+                                </div>
+                                <button 
+                                    onClick={() => setShowRemediation(true)}
+                                    className="mt-4 w-full py-2 border border-blue-600 text-blue-600 text-sm font-medium rounded-lg hover:bg-blue-50 transition"
+                                >
+                                    View Remediation Plan
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <FooterSection />
+                </div>
+            );
+        };
+
+        // ============== SALT DETAILS PAGE ==============
+        const SALTDetailsPage = ({ agentName, user, onBack, onLogout, onAddAgent, cachedData, onDataLoaded }) => {
+            const [data, setData] = useState(cachedData || null);
+            const [loading, setLoading] = useState(!cachedData);
+            
+            // Use ref to track if we've already fetched
+            const hasFetchedRef = React.useRef(false);
+            const lastAgentRef = React.useRef(agentName);
+
+            // Reset fetch tracking when agent changes
+            if (lastAgentRef.current !== agentName) {
+                hasFetchedRef.current = false;
+                lastAgentRef.current = agentName;
+            }
+
+            useEffect(() => {
+                // Use cached data if available
+                if (cachedData) {
+                    setData(cachedData);
+                    setLoading(false);
+                    hasFetchedRef.current = true;
+                    return;
+                }
+                
+                // Prevent duplicate fetches
+                if (hasFetchedRef.current) {
+                    return;
+                }
+                
+                hasFetchedRef.current = true;
+                setLoading(true);
+                fetch(`/api/visibility/full?name=${encodeURIComponent(agentName)}`)
+                    .then(r => r.json())
+                    .then(d => {
+                        setData(d);
+                        // Cache at parent level
+                        if (onDataLoaded && !d.error) {
+                            onDataLoaded(d);
+                        }
+                        setLoading(false);
+                    })
+                    .catch(() => {
+                        setData({error: 'Failed to load data'});
+                        setLoading(false);
+                    });
+            }, [agentName, cachedData]); // Removed onDataLoaded from deps to prevent infinite loop
+
+            if (loading) return <LoadingScreen title="Loading SALT Analysis" subtitle="Computing visibility metrics"/>;
+
+            if (!data || data.error) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100 p-6">
+                        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 text-center">
+                            <h2 className="text-2xl font-bold text-gray-900 mb-3">Error Loading SALT Data</h2>
+                            <button onClick={onBack} className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-xl">Go Back</button>
+                        </div>
+                    </div>
+                );
+            }
+
+            const agent = data.agent || {};
+            const analysis = data.analysis || {};
+            const scores = analysis.scores || {};
+
+            const saltMetrics = [
+                {
+                    key: 'semantic',
+                    label: 'Semantic',
+                    icon: '🔍',
+                    color: 'blue',
+                    fullName: 'Semantic Identity',
+                    question: 'Can AI identify who you are?',
+                    description: 'Measures how clearly and consistently your identity appears across the web. AI systems need unambiguous signals to confidently recommend you.',
+                    score: scores.semantic?.score || 0,
+                    grade: scores.semantic?.grade || 'N/A',
+                    factors: scores.semantic?.factors || [],
+                    summary: scores.semantic?.summary || 'Identity clarity assessment based on name consistency, role positioning, and cross-platform presence.',
+                    breakdown: scores.semantic?.breakdown || {},
+                    improvements: [
+                        'Ensure your full professional name is consistent across all platforms',
+                        'Add a detailed bio (100+ words) describing your expertise and market focus',
+                        'Include your brokerage affiliation and license information prominently',
+                        'Create profiles on all major platforms with matching information'
+                    ]
+                },
+                {
+                    key: 'authority',
+                    label: 'Authority',
+                    icon: '👑',
+                    color: 'purple',
+                    fullName: 'Content Authority',
+                    question: 'Does AI have credible content to cite?',
+                    description: 'Evaluates whether you have authoritative content that AI can reference. This includes your website, reviews, social media presence, and media mentions.',
+                    score: scores.authority?.score || 0,
+                    grade: scores.authority?.grade || 'N/A',
+                    factors: scores.authority?.factors || [],
+                    summary: scores.authority?.summary || 'Authority assessment based on owned content, review volume, and cite-worthiness.',
+                    breakdown: scores.authority?.breakdown || {},
+                    improvements: [
+                        'Build and maintain a professional website with regular content updates',
+                        'Actively collect reviews on Google, Zillow, and Realtor.com (target 100+)',
+                        'Establish presence on LinkedIn with recommendations from clients',
+                        'Create video content and market reports to demonstrate expertise'
+                    ]
+                },
+                {
+                    key: 'location',
+                    label: 'Location',
+                    icon: '📍',
+                    color: 'green',
+                    fullName: 'Location Visibility',
+                    question: 'What markets can AI associate you with?',
+                    description: 'Assesses how well AI can connect you to specific geographic markets. Strong location signals help AI recommend you for local searches.',
+                    score: scores.location?.score || 0,
+                    grade: scores.location?.grade || 'N/A',
+                    factors: scores.location?.factors || [],
+                    summary: scores.location?.summary || 'Location visibility based on geographic signals and neighborhood authority.',
+                    breakdown: scores.location?.breakdown || {},
+                    improvements: [
+                        'Add city, neighborhoods, and ZIP codes to all profiles and bios',
+                        'Create neighborhood-specific pages on your website',
+                        'Publish local market reports and area guides regularly',
+                        'Ensure your Google Business Profile has accurate location data'
+                    ]
+                },
+                {
+                    key: 'trust',
+                    label: 'Trust',
+                    icon: '🛡️',
+                    color: 'amber',
+                    fullName: 'Trust & Safety',
+                    question: 'Is it safe for AI to recommend you?',
+                    description: 'Measures the risk level associated with recommending you. AI systems prioritize agents with verified credentials, positive sentiment, and strong reputation signals.',
+                    score: scores.trust?.score || 0,
+                    grade: scores.trust?.grade || 'N/A',
+                    factors: scores.trust?.factors || [],
+                    summary: scores.trust?.summary || 'Trust assessment based on sentiment, licensing verification, and reputation signals.',
+                    breakdown: scores.trust?.breakdown || {},
+                    improvements: [
+                        'Maintain 4.7+ average rating across review platforms',
+                        'Ensure license status is current and verifiable online',
+                        'Respond to all reviews (positive and negative) professionally',
+                        'Document and showcase successful transactions and client outcomes'
+                    ]
+                }
+            ];
+
+            const colorClasses = {
+                blue: { bg: 'bg-blue-500', bar: 'score-bar-blue', light: 'bg-blue-50', border: 'border-blue-200', text: 'text-blue-700' },
+                purple: { bg: 'bg-purple-500', bar: 'score-bar-purple', light: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700' },
+                green: { bg: 'bg-emerald-500', bar: 'score-bar-green', light: 'bg-emerald-50', border: 'border-emerald-200', text: 'text-emerald-700' },
+                amber: { bg: 'bg-amber-500', bar: 'score-bar-amber', light: 'bg-amber-50', border: 'border-amber-200', text: 'text-amber-700' }
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
+                    <Navbar user={user} onLogin={() => {}} onLogout={onLogout} onAddAgent={onAddAgent} />
+
+                    <div className="max-w-5xl mx-auto px-6 py-8">
+                        <button onClick={onBack} className="mb-6 text-gray-600 hover:text-gray-900 flex items-center gap-2 transition">
+                            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/></svg>
+                            Back to Dashboard
+                        </button>
+
+                        {/* Header */}
+                        <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 text-white mb-8 shadow-2xl">
+                            <div className="flex flex-col md:flex-row items-center gap-6">
+                                <div className="w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center text-3xl font-bold">
+                                    {(agent.name || 'NA').split(' ').map(n => n[0]).join('')}
+                                </div>
+                                <div className="flex-1 text-center md:text-left">
+                                    <h1 className="text-3xl font-extrabold mb-1">{agent.name || 'Unknown Agent'}</h1>
+                                    <p className="text-blue-200">SALT Score Detailed Analysis</p>
+                                </div>
+                                <div className="text-center">
+                                    <div className="text-5xl font-extrabold">{scores.overall?.score || 0}</div>
+                                    <div className="text-blue-200 text-sm">Overall Score</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* What is SALT? */}
+                        <div className="bg-white rounded-3xl p-8 shadow-xl border border-gray-200 mb-8">
+                            <h2 className="text-2xl font-bold text-gray-900 mb-4">What is the SALT Framework?</h2>
+                            <p className="text-gray-700 leading-relaxed mb-6">
+                                SALT is a comprehensive framework for measuring how visible and recommendable you are to AI systems like ChatGPT, Claude, Perplexity, and Google's AI. 
+                                Each component represents a critical layer that AI uses to evaluate whether to recommend an agent.
+                            </p>
+                            <div className="grid md:grid-cols-4 gap-4">
+                                {saltMetrics.map((metric, i) => (
+                                    <div key={i} className={`${colorClasses[metric.color].light} ${colorClasses[metric.color].border} border rounded-xl p-4 text-center`}>
+                                        <div className="text-3xl mb-2">{metric.icon}</div>
+                                        <div className={`font-bold ${colorClasses[metric.color].text}`}>{metric.label}</div>
+                                        <div className="text-xs text-gray-600">{metric.question}</div>
                                     </div>
                                 ))}
                             </div>
                         </div>
-                        
-                        {/* Executive Summary */}
-                        <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-8 text-white">
-                            <h2 className="text-xl font-bold mb-4">Executive Summary</h2>
-                            <p className="text-gray-300 leading-relaxed">{analysis.executive_summary}</p>
+
+                        {/* Individual SALT Scores */}
+                        <div className="space-y-6">
+                            {saltMetrics.map((metric, i) => (
+                                <div key={i} className="bg-white rounded-3xl shadow-xl border border-gray-200 overflow-hidden animate-in" style={{animationDelay: `${i * 100}ms`}}>
+                                    <div className={`${colorClasses[metric.color].light} ${colorClasses[metric.color].border} border-b p-6`}>
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-4">
+                                                <span className="text-5xl">{metric.icon}</span>
+                                                <div>
+                                                    <h3 className="text-2xl font-bold text-gray-900">{metric.fullName}</h3>
+                                                    <p className={`${colorClasses[metric.color].text} font-medium`}>{metric.question}</p>
+                                                </div>
+                                            </div>
+                                            <div className="text-right">
+                                                <div className="text-4xl font-extrabold text-gray-900">{metric.score}<span className="text-lg text-gray-500">/100</span></div>
+                                                <div className={`inline-block px-3 py-1 ${colorClasses[metric.color].light} ${colorClasses[metric.color].text} rounded-full text-sm font-semibold`}>
+                                                    Grade: {metric.grade}
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="mt-4 h-4 bg-gray-200 rounded-full overflow-hidden">
+                                            <div className={`h-full ${colorClasses[metric.color].bar} rounded-full transition-all duration-1000`} style={{width: `${metric.score}%`}}/>
+                                        </div>
+                                    </div>
+                                    <div className="p-6">
+                                        <p className="text-gray-700 mb-6">{metric.description}</p>
+                                        
+                                        {metric.factors.length > 0 && (
+                                            <div className="mb-6">
+                                                <h4 className="font-semibold text-gray-900 mb-3">Contributing Factors</h4>
+                                                <div className="flex flex-wrap gap-2">
+                                                    {metric.factors.map((factor, j) => (
+                                                        <span key={j} className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm">
+                                                            ✓ {factor}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className={`${colorClasses[metric.color].light} rounded-xl p-4`}>
+                                            <h4 className="font-semibold text-gray-900 mb-3">How to Improve This Score</h4>
+                                            <ul className="space-y-2">
+                                                {metric.improvements.map((imp, j) => (
+                                                    <li key={j} className="flex items-start gap-2 text-gray-700">
+                                                        <span className={`${colorClasses[metric.color].text} font-bold`}>→</span>
+                                                        {imp}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
-                    </main>
+
+                        {/* Why SALT Matters */}
+                        <div className="mt-8 bg-gradient-to-br from-blue-600 to-purple-600 rounded-3xl p-8 text-white">
+                            <h2 className="text-2xl font-bold mb-4">Why SALT Matters for Your Business</h2>
+                            <div className="grid md:grid-cols-2 gap-6">
+                                <div className="bg-white/10 rounded-xl p-5">
+                                    <div className="text-3xl mb-2">🤖</div>
+                                    <h3 className="font-bold mb-2">AI is the New Search</h3>
+                                    <p className="text-blue-100 text-sm">More consumers are asking AI assistants for agent recommendations instead of traditional search engines.</p>
+                                </div>
+                                <div className="bg-white/10 rounded-xl p-5">
+                                    <div className="text-3xl mb-2">📈</div>
+                                    <h3 className="font-bold mb-2">First-Mover Advantage</h3>
+                                    <p className="text-blue-100 text-sm">Agents who optimize for AI visibility now will dominate their markets as AI adoption grows.</p>
+                                </div>
+                                <div className="bg-white/10 rounded-xl p-5">
+                                    <div className="text-3xl mb-2">🎯</div>
+                                    <h3 className="font-bold mb-2">Higher Quality Leads</h3>
+                                    <p className="text-blue-100 text-sm">AI recommendations carry more weight, leading to more qualified and motivated clients.</p>
+                                </div>
+                                <div className="bg-white/10 rounded-xl p-5">
+                                    <div className="text-3xl mb-2">💰</div>
+                                    <h3 className="font-bold mb-2">Competitive Edge</h3>
+                                    <p className="text-blue-100 text-sm">Most agents don't understand AI visibility yet. Optimize now to stay ahead of the competition.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <FooterSection />
                 </div>
             );
         };
-        
+
         // ============== MAIN APP ==============
-        
         function App() {
             const [user, setUser] = useState(null);
-            const [page, setPage] = useState('login'); // login, search, snapshot, paywall, report
+            const [page, setPage] = useState('search');
             const [agentName, setAgentName] = useState('');
+            const [showLoginModal, setShowLoginModal] = useState(false);
+            const [showAddAgentModal, setShowAddAgentModal] = useState(false);
             
+            // Centralized cache for agent data - prevents repeated loading
+            const [agentDataCache, setAgentDataCache] = useState({});
+            const [fullReportCache, setFullReportCache] = useState({});
+
             // Check auth on mount
             useEffect(() => {
                 fetch('/api/auth/status')
@@ -1076,67 +2878,177 @@ FRONTEND_HTML = '''
                     .then(d => {
                         if (d.logged_in) {
                             setUser(d);
-                            setPage('search');
                         }
-                    });
+                    })
+                    .catch(() => {});
             }, []);
-            
-            const handleLogin = (userData) => {
+
+            const handleLogin = useCallback((userData) => {
                 setUser(userData);
+                setShowLoginModal(false);
+                // Clear cache on login to refresh with new permissions
+                setAgentDataCache({});
+                setFullReportCache({});
+            }, []);
+
+            const handleLogout = useCallback(async () => {
+                await fetch('/api/auth/logout', { method: 'POST' });
+                setUser(null);
                 setPage('search');
-            };
-            
-            const handleSearch = (name) => {
+                // Clear cache on logout
+                setAgentDataCache({});
+                setFullReportCache({});
+            }, []);
+
+            const handleSearch = useCallback((name) => {
                 setAgentName(name);
                 setPage('snapshot');
-            };
-            
-            const handleUpgrade = () => {
+            }, []);
+
+            const handleUpgrade = useCallback(() => {
                 if (user?.paid) {
                     setPage('report');
                 } else {
                     setPage('paywall');
                 }
-            };
-            
-            const handlePaymentSuccess = (userData) => {
+            }, [user?.paid]);
+
+            const handlePaymentSuccess = useCallback((userData) => {
                 setUser(userData);
+                // Clear full report cache to refetch with paid status
+                setFullReportCache({});
                 setPage('report');
-            };
-            
-            // Render pages
-            if (page === 'login') return <LoginPage onLogin={handleLogin}/>;
-            if (page === 'search') return <SearchPage user={user} onSearch={handleSearch}/>;
-            if (page === 'snapshot') return <SnapshotPage agentName={agentName} user={user} onUpgrade={handleUpgrade} onBack={() => setPage('search')}/>;
-            if (page === 'paywall') return <PaywallPage agentName={agentName} user={user} onPaymentSuccess={handlePaymentSuccess} onBack={() => setPage('snapshot')}/>;
-            if (page === 'report') return <FullReportPage agentName={agentName} user={user} onBack={() => setPage('search')}/>;
-            
-            return null;
+            }, []);
+
+            const handleAddAgent = useCallback(() => {
+                setShowAddAgentModal(true);
+            }, []);
+
+            const handleAddAgentSuccess = useCallback((result) => {
+                alert(result.message);
+                setShowAddAgentModal(false);
+                // Clear cache for new agent
+                setAgentDataCache({});
+                setFullReportCache({});
+                handleSearch(result.agent_name);
+            }, [handleSearch]);
+
+            const handleViewSALT = useCallback(() => {
+                setPage('salt');
+            }, []);
+
+            return (
+                <>
+                    {page === 'search' && (
+                        <SearchPage
+                            user={user}
+                            onSearch={handleSearch}
+                            onLogin={() => setShowLoginModal(true)}
+                            onLogout={handleLogout}
+                            onAddAgent={handleAddAgent}
+                        />
+                    )}
+                    {page === 'snapshot' && (
+                        <SnapshotPage
+                            agentName={agentName}
+                            user={user}
+                            onBack={() => setPage('search')}
+                            onUpgrade={handleUpgrade}
+                            onLogin={handleLogin}
+                            onLogout={handleLogout}
+                            onAddAgent={handleAddAgent}
+                            onViewSALT={handleViewSALT}
+                            cachedData={agentDataCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setAgentDataCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
+                        />
+                    )}
+                    {page === 'paywall' && (
+                        <PaywallPage
+                            agentName={agentName}
+                            user={user}
+                            onBack={() => setPage('snapshot')}
+                            onPaymentSuccess={handlePaymentSuccess}
+                            onLogout={handleLogout}
+                            onAddAgent={handleAddAgent}
+                        />
+                    )}
+                    {page === 'report' && (
+                        <FullReportPage
+                            agentName={agentName}
+                            user={user}
+                            onBack={() => setPage('search')}
+                            onLogout={handleLogout}
+                            onAddAgent={handleAddAgent}
+                            onViewSALT={handleViewSALT}
+                            cachedData={fullReportCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setFullReportCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
+                        />
+                    )}
+                    {page === 'salt' && (
+                        <SALTDetailsPage
+                            agentName={agentName}
+                            user={user}
+                            onBack={() => setPage(user?.paid ? 'report' : 'snapshot')}
+                            onLogout={handleLogout}
+                            onAddAgent={handleAddAgent}
+                            cachedData={fullReportCache[agentName?.toLowerCase()]}
+                            onDataLoaded={(data) => setFullReportCache(prev => ({...prev, [agentName?.toLowerCase()]: data}))}
+                        />
+                    )}
+
+                    <LoginModal
+                        show={showLoginModal}
+                        onClose={() => setShowLoginModal(false)}
+                        onSuccess={handleLogin}
+                    />
+
+                    <AddAgentModal
+                        show={showAddAgentModal}
+                        onClose={() => setShowAddAgentModal(false)}
+                        onSuccess={handleAddAgentSuccess}
+                    />
+                </>
+            );
         }
-        
+
         ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
     </script>
 </body>
 </html>
 '''
 
-@app.route('/')
-def index():
-    return Response(FRONTEND_HTML, mimetype='text/html')
-
-# ============== MAIN ==============
-
-def run_server():
-    print(f"""
-============================================================
-       VIEWEO - AI Visibility Platform
-       GEO for Real Estate Agents
-============================================================
-Server: http://localhost:{Config.PORT}
-Gemini: {'Enabled' if Config.GEMINI_API_KEY else 'Disabled'}
-============================================================
-    """)
-    app.run(host='0.0.0.0', port=Config.PORT, debug=Config.DEBUG)
+def create_app():
+    """Application factory for production deployments (gunicorn, etc.)"""
+    # Pre-load system on app startup
+    try:
+        get_system()
+    except Exception as e:
+        print(f"⚠️ Warning: Could not pre-load system: {e}")
+    return app
 
 if __name__ == '__main__':
-    run_server()
+    import argparse
+    parser = argparse.ArgumentParser(description='Vieweo - AI Visibility Platform')
+    parser.add_argument('--port', '-p', type=int, default=int(os.environ.get('PORT', 8080)), help='Port to run on')
+    parser.add_argument('--host', '-H', default='0.0.0.0', help='Host to bind to')
+    parser.add_argument('--debug', '-d', action='store_true', help='Enable debug mode')
+    args = parser.parse_args()
+    
+    print(f"\n{'='*60}")
+    print(f"🌐 Starting Vieweo on http://{args.host}:{args.port}")
+    print(f"📊 Environment: {'DEBUG' if args.debug else 'PRODUCTION'}")
+    print(f"{'='*60}\n")
+    
+    # Pre-load system
+    try:
+        get_system()
+    except Exception as e:
+        print(f"⚠️ Warning: System will load on first request: {e}")
+    
+    app.run(
+        host=args.host, 
+        port=args.port, 
+        debug=args.debug, 
+        use_reloader=args.debug,
+        threaded=True
+    )
